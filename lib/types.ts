@@ -80,3 +80,112 @@ export const PROPERTY_SLUGS = {
   moab: 'moab',
   bearLake: 'bear-lake',
 } as const
+
+// ─── Phase 2 Types ────────────────────────────────────────────────────────────
+
+export interface Event {
+  id: string
+  name: string
+  event_date: string
+  end_date?: string | null
+  event_type: string
+  property_id?: string | null
+  location?: string | null
+  is_active: boolean
+  notes?: string | null
+  created_at: string
+}
+
+export interface OpenDateAnalysis {
+  date: string
+  days_until_checkin: number
+  is_behind_pace: boolean
+  alert_level: 'watch' | 'action' | null
+  suggested_discount: number
+  base_price: number
+  seasonal_multiplier: number
+  recommended_price_low: number
+  recommended_price_high: number
+  event_name?: string
+  is_weekend: boolean
+}
+
+export interface OrphanGap {
+  start_date: string
+  end_date: string
+  nights: number
+  suggested_discount: number
+  suggested_min_stay: number
+  adjacent_to_event: boolean
+  preceding_booking_id: string
+  following_booking_id: string
+}
+
+export interface UpcomingEvent {
+  id: string
+  name: string
+  event_date: string
+  end_date?: string | null
+  event_type: string
+  days_until: number
+  multiplier: number
+}
+
+export type WeatherFlagType =
+  | 'heat_friction'
+  | 'flash_flood_risk'
+  | 'snow_opportunity'
+  | 'demand_boost'
+  | 'demand_softness'
+  | 'memorial_day_risk'
+
+export interface WeatherFlag {
+  property_id: string
+  property_name: string
+  type: WeatherFlagType
+  message: string
+  affected_dates?: string[]
+  generated_at: string
+}
+
+export interface PricingAlert {
+  date: string
+  alert_level: 'watch' | 'action'
+  reason: string
+  suggested_discount: number
+  recommended_price_low: number
+  recommended_price_high: number
+}
+
+export interface SpecialWindow {
+  name: string
+  start_date: string
+  end_date: string
+  days_until_start: number
+  recommended_action: string
+  is_pricing_set: boolean
+  property_applicable: boolean
+}
+
+export interface CalendarStatus {
+  january_surge_flag: boolean
+  summer_dates_priced: boolean
+  peak_event_windows_priced: boolean
+  flags: string[]
+}
+
+export interface RulesEngineOutput {
+  property_id: string
+  property_name: string
+  generated_at: string
+  occupancy_pct_this_month: number
+  occupancy_pct_next_month: number
+  avg_lead_time_days: number
+  open_dates: OpenDateAnalysis[]
+  orphan_gaps: OrphanGap[]
+  upcoming_events: UpcomingEvent[]
+  weather_flags: WeatherFlag[]
+  pricing_alerts: PricingAlert[]
+  special_windows: SpecialWindow[]
+  calendar_status: CalendarStatus
+}
