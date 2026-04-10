@@ -189,3 +189,61 @@ export interface RulesEngineOutput {
   special_windows: SpecialWindow[]
   calendar_status: CalendarStatus
 }
+
+// ─── Phase 3 Types ────────────────────────────────────────────────────────────
+
+export interface AIRecommendation {
+  priority: number
+  action: string
+  detail: string
+  dates: string
+  suggested_price?: number
+  current_price?: number
+  reason: string
+  status?: 'pending' | 'applied' | 'dismissed'
+}
+
+export interface AIAnalysis {
+  overall_assessment: string
+  recommendations: AIRecommendation[]
+}
+
+export interface CalendarEntry {
+  date: string
+  recommended_price_low: number | null
+  recommended_price_high: number | null
+  alert_level: 'watch' | 'action' | null
+  suggested_discount: number | null
+  seasonal_multiplier: number | null
+}
+
+export interface CalendarBooking {
+  id: string
+  check_in: string
+  check_out: string
+  nights: number
+  total_revenue: number
+  nightly_rate: number | null
+  status: string
+}
+
+export interface CalendarEvent {
+  id: string
+  name: string
+  event_date: string
+  end_date: string | null
+  event_type: string
+}
+
+export interface CalendarData {
+  bookings: CalendarBooking[]
+  entries: CalendarEntry[]
+  events: CalendarEvent[]
+}
+
+export interface BookingStats {
+  this_month_revenue: number
+  this_month_bookings: number
+  last_year_revenue: number
+  last_year_bookings: number
+}
