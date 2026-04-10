@@ -341,8 +341,8 @@ export default function DashboardPage() {
         localStorage.setItem(
           'dismissed_alerts',
           JSON.stringify({
-            alerts: [...alerts],
-            weather: [...weather],
+            alerts: Array.from(alerts),
+            weather: Array.from(weather),
             expiry: Date.now() + 48 * 60 * 60 * 1000, // 48 hours
           })
         )
