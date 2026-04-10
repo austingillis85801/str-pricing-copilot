@@ -163,7 +163,7 @@ function detectOrphanGaps(bookings: Booking[], events: Event[]): OrphanGap[] {
 
     // Collect gap date strings
     const gapDates: string[] = []
-    let d = new Date(checkOut)
+    const d = new Date(checkOut)
     while (d < nextIn) {
       gapDates.push(d.toISOString().split('T')[0])
       d.setDate(d.getDate() + 1)
@@ -427,7 +427,7 @@ export async function runRulesEngine(propertyId: string): Promise<RulesEngineOut
   for (const booking of bookings) {
     const checkIn = new Date(booking.check_in + 'T00:00:00')
     const checkOut = new Date(booking.check_out + 'T00:00:00')
-    let cur = new Date(checkIn)
+    const cur = new Date(checkIn)
     while (cur < checkOut) {
       bookedDates.add(cur.toISOString().split('T')[0])
       cur.setDate(cur.getDate() + 1)
@@ -456,7 +456,7 @@ export async function runRulesEngine(propertyId: string): Promise<RulesEngineOut
     )
 
     // Seasonal multiplier and recommended price range
-    const { multiplier, reason: _reason } = getSeasonalMultiplier(date, property, events)
+    const { multiplier } = getSeasonalMultiplier(date, property, events)
     const { low, high } = calculateNightlyRate(property.base_price, multiplier)
 
     // Discount trigger rules — most urgent wins

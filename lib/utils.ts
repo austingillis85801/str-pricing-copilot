@@ -47,7 +47,7 @@ export async function getMonthOccupancy(
     const effectiveStart = checkIn < monthStart ? monthStart : checkIn
     const effectiveEnd = checkOut > nextMonthStart ? nextMonthStart : checkOut
 
-    let current = new Date(effectiveStart)
+    const current = new Date(effectiveStart)
     while (current < effectiveEnd) {
       bookedDates.add(current.toISOString().split('T')[0])
       current.setDate(current.getDate() + 1)
