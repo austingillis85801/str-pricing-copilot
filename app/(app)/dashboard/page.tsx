@@ -437,7 +437,7 @@ export default function DashboardPage() {
       }
     }
   }
-  const upcomingEvents = [...eventMap.values()].sort((a, b) => a.days_until - b.days_until)
+  const upcomingEvents = Array.from(eventMap.values()).sort((a, b) => a.days_until - b.days_until)
 
   // Group events by week
   const eventsByWeek = new Map<string, typeof upcomingEvents>()
@@ -459,7 +459,7 @@ export default function DashboardPage() {
       }
     }
   }
-  const specialWindows = [...windowMap.values()].sort(
+  const specialWindows = Array.from(windowMap.values()).sort(
     (a, b) => a.days_until_start - b.days_until_start
   )
 
@@ -637,7 +637,7 @@ export default function DashboardPage() {
         <section>
           <h2 className="text-lg font-semibold text-white mb-3">📅 Upcoming Demand Signals</h2>
           <div className="bg-slate-800 border border-slate-700 rounded-xl divide-y divide-slate-700">
-            {[...eventsByWeek.entries()].map(([weekKey, events]) => {
+            {Array.from(eventsByWeek.entries()).map(([weekKey, events]) => {
               const weekStart = new Date(weekKey + 'T00:00:00')
               const weekLabel = weekStart.toLocaleDateString('en-US', {
                 month: 'short',
