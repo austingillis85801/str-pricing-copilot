@@ -6,6 +6,142 @@ import { AMENITIES } from '@/lib/types'
 import type { Property, PropertyFormData, Platform, CsvImport } from '@/lib/types'
 import { format } from 'date-fns'
 
+interface EmailLogEntry {
+  id: string
+  subject: string
+  recipient: string
+  status: string
+  sender_used: string
+  error_message: string | null
+  created_at: string
+}
+
+function EmailDigestSection() {
+  const [sending, setSending] = useState(false)
+  const [result, setResult] = useState<{ success: boolean; subject?: string; error?: string } | null>(null)
+  const [emailLog, setEmailLog] = useState<EmailLogEntry[]>([])
+  const [logLoading, setLogLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/email-log')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setEmailLog(data))
+      .catch(() => setEmailLog([]))
+      .finally(() => setLogLoading(false))
+  }, [result])
+
+  async function sendNow() {
+    setSending(true)
+    setResult(null)
+    try {
+      const res = await fetch('/api/digest/send-now')
+      const data = await res.json()
+      setResult(data)
+    } catch (err) {
+      setResult({ success: false, error: String(err) })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  function statusBadge(status: string) {
+    const map: Record<string, string> = {
+      sent: 'bg-emerald-500/10 text-emerald-400',
+      fallback_used: 'bg-yellow-500/10 text-yellow-400',
+      failed: 'bg-red-500/10 text-red-400',
+      both_failed: 'bg-red-500/10 text-red-400',
+    }
+    const label: Record<string, string> = {
+      sent: 'Sent',
+      fallback_used: 'Fallback used',
+      failed: 'Failed',
+      both_failed: 'Failed',
+    }
+    const cls = map[status] ?? 'bg-slate-500/10 text-slate-400'
+    return (
+      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium capitalize ${cls}`}>
+        {label[status] ?? status}
+      </span>
+    )
+  }
+
+  return (
+    <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Email Digest</h2>
+          <p className="text-slate-400 text-sm mt-0.5">
+            Sent every Friday at 3pm MST. Runs both properties through the rules engine, then Claude generates the digest.
+          </p>
+        </div>
+        <button
+          onClick={sendNow}
+          disabled={sending}
+          className="shrink-0 flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
+        >
+          {sending ? (
+            <>
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Sending…
+            </>
+          ) : (
+            'Send Test Digest Now'
+          )}
+        </button>
+      </div>
+
+      {result && (
+        <div className={`mb-5 rounded-lg px-4 py-3 text-sm font-medium ${
+          result.success
+            ? 'bg-emerald-900/20 border border-emerald-600/40 text-emerald-300'
+            : 'bg-red-900/20 border border-red-500/40 text-red-300'
+        }`}>
+          {result.success
+            ? `Digest sent successfully — "${result.subject}"`
+            : `Error: ${result.error}`}
+        </div>
+      )}
+
+      <h3 className="text-sm font-medium text-slate-300 mb-3">Past Digests</h3>
+      {logLoading ? (
+        <div className="h-16 bg-slate-800/50 rounded-lg animate-pulse" />
+      ) : emailLog.length === 0 ? (
+        <p className="text-slate-500 text-sm">No digests sent yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b border-slate-700/50">
+                <th className="pb-3 text-xs font-medium text-slate-400">Date</th>
+                <th className="pb-3 text-xs font-medium text-slate-400">Subject</th>
+                <th className="pb-3 text-xs font-medium text-slate-400">Status</th>
+                <th className="pb-3 text-xs font-medium text-slate-400">Sender</th>
+              </tr>
+            </thead>
+            <tbody>
+              {emailLog.map((entry) => (
+                <tr key={entry.id} className="border-b border-slate-700/30 last:border-0">
+                  <td className="py-3 text-slate-400 whitespace-nowrap">
+                    {format(new Date(entry.created_at), 'MMM d, yyyy h:mm a')}
+                  </td>
+                  <td className="py-3 text-slate-300 max-w-[240px] truncate" title={entry.subject}>
+                    {entry.subject}
+                  </td>
+                  <td className="py-3">{statusBadge(entry.status)}</td>
+                  <td className="py-3 text-slate-400 capitalize">{entry.sender_used?.replace('_', ' ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const DEFAULT_MOAB: PropertyFormData = {
   name: 'Moab Property',
   location: 'Moab, UT',
@@ -392,6 +528,9 @@ export default function SettingsPage() {
           saving={savingBearLake}
         />
       </div>
+
+      {/* Email Digest */}
+      <EmailDigestSection />
 
       {/* Import history */}
       <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
