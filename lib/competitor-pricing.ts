@@ -50,6 +50,21 @@ export interface CompetitorListing {
   distance_miles: number | null
   platform: 'airbnb' | 'airroi'
   url: string | null
+  // ── Fees (AirROI) ───────────────────────────────
+  cleaning_fee: number | null
+  extra_guest_fee: number | null
+  // ── Booking settings (AirROI) ───────────────────
+  min_nights: number | null
+  instant_book: boolean | null
+  cancellation_policy: string | null
+  // ── Performance metrics (AirROI TTM = trailing 12 months) ──
+  ttm_revenue: number | null
+  ttm_occupancy: number | null
+  l90d_avg_rate: number | null
+  l90d_occupancy: number | null
+  // ── Host (AirROI) ───────────────────────────────
+  superhost: boolean | null
+  num_reviews: number | null
 }
 
 export interface MarketSnapshot {
@@ -62,6 +77,12 @@ export interface MarketSnapshot {
   market_adr: number | null
   airroi_cached: boolean
   cached_at: string
+  // ── Additional AirROI market metrics ────────────
+  booking_lead_time: number | null
+  avg_length_of_stay: number | null
+  market_min_nights: number | null
+  active_listings_count: number | null
+  rev_par: number | null
 }
 
 export interface CompetitorData {
@@ -290,6 +311,18 @@ export async function fetchApifyResults(
         distance_miles: distanceMiles,
         platform: 'airbnb' as const,
         url: item.url ? String(item.url) : null,
+        // Fields only available from AirROI comparables
+        cleaning_fee: null,
+        extra_guest_fee: null,
+        min_nights: null,
+        instant_book: null,
+        cancellation_policy: null,
+        ttm_revenue: null,
+        ttm_occupancy: null,
+        l90d_avg_rate: null,
+        l90d_occupancy: null,
+        superhost: null,
+        num_reviews: null,
       }
     })
     .filter((item) => item.price_per_night > 0)
@@ -403,98 +436,93 @@ function extractBedrooms(item: Record<string, unknown>): number | null {
 
 const AIRROI_BASE = 'https://api.airroi.com'
 
+export interface AirROIMarketData {
+  adr: number | null
+  occupancy_rate: number | null
+  booking_lead_time: number | null
+  avg_length_of_stay: number | null
+  market_min_nights: number | null
+  active_listings_count: number | null
+  rev_par: number | null
+}
+
 export async function fetchAirROIMarket(
   lat: number,
   lng: number,
   bedrooms?: number
-): Promise<{ adr: number | null; occupancy_rate: number | null }> {
-  const apiKey = process.env.AIRROI_API_KEY
-  if (!apiKey) {
-    console.log('AirROI: AIRROI_API_KEY not set, skipping')
-    return { adr: null, occupancy_rate: null }
+): Promise<AirROIMarketData> {
+  const NULL_MARKET: AirROIMarketData = {
+    adr: null, occupancy_rate: null, booking_lead_time: null,
+    avg_length_of_stay: null, market_min_nights: null,
+    active_listings_count: null, rev_par: null,
   }
 
-  const headers = {
-    'X-API-KEY': apiKey,
-    'Content-Type': 'application/json',
-  }
+  const apiKey = process.env.AIRROI_API_KEY
+  if (!apiKey) { console.log('AirROI: AIRROI_API_KEY not set, skipping'); return NULL_MARKET }
+
+  const headers = { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }
 
   try {
-    // ── Step 1: Look up the market at these coordinates ─────────────────────
-    // /markets/lookup?lat=&lng= returns {country, region, locality, district} — confirmed working.
+    // Step 1: market lookup → {country, region, locality, district}
     const lookupRes = await fetch(
       `${AIRROI_BASE}/markets/lookup?lat=${lat}&lng=${lng}`,
       { headers, signal: AbortSignal.timeout(15_000) }
     )
-
     if (!lookupRes.ok) {
-      const body = await lookupRes.text().catch(() => '')
-      console.warn(`AirROI /markets/lookup error ${lookupRes.status}: ${body}`)
-      return { adr: null, occupancy_rate: null }
+      console.warn(`AirROI /markets/lookup error ${lookupRes.status}`)
+      return NULL_MARKET
     }
-
     const lookupData = await lookupRes.json() as Record<string, unknown>
-    console.log('AirROI market lookup raw:', JSON.stringify(lookupData).slice(0, 400))
-
-    // Unwrap .data wrapper if present
     const mkt = (lookupData.data ?? lookupData) as Record<string, unknown>
     const { country, region, locality, district } = mkt as {
       country?: string; region?: string; locality?: string; district?: string | null
     }
-
     if (!country || !region || !locality) {
-      console.warn('AirROI: missing market fields', JSON.stringify(lookupData).slice(0, 200))
-      return { adr: null, occupancy_rate: null }
+      console.warn('AirROI: missing market fields in lookup')
+      return NULL_MARKET
     }
 
-    console.log(`AirROI market: ${locality}, ${region}, ${country}`)
-
-    // ── Step 2: Get market summary (ADR + occupancy) ─────────────────────────
-    // Include bedroom filter to match our property type (±1 bedroom)
+    // Step 2: market summary → all metrics in one call
+    // Confirmed live fields: occupancy, average_daily_rate, rev_par, revenue,
+    //   booking_lead_time, length_of_stay, min_nights, active_listings_count
     const bedroomFilter = bedrooms != null
       ? { bedrooms: { range: [Math.max(0, bedrooms - 1), bedrooms + 1] } }
       : {}
 
-    const summaryRes = await fetch(
-      `${AIRROI_BASE}/markets/summary`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          market: { country, region, locality, district: district ?? null },
-          filter: {
-            ...bedroomFilter,
-            room_type: { eq: 'entire_home' },
-          },
-          num_months: 12,
-          currency: 'usd',
-        }),
-        signal: AbortSignal.timeout(15_000),
-      }
-    )
-
+    const summaryRes = await fetch(`${AIRROI_BASE}/markets/summary`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        market: { country, region, locality, district: district ?? null },
+        filter: { ...bedroomFilter, room_type: { eq: 'entire_home' } },
+        num_months: 12,
+        currency: 'usd',
+      }),
+      signal: AbortSignal.timeout(15_000),
+    })
     if (!summaryRes.ok) {
-      const body = await summaryRes.text().catch(() => '')
-      console.warn(`AirROI /markets/summary error ${summaryRes.status}: ${body}`)
-      return { adr: null, occupancy_rate: null }
+      console.warn(`AirROI /markets/summary error ${summaryRes.status}`)
+      return NULL_MARKET
     }
 
-    const summaryData = await summaryRes.json() as Record<string, unknown>
-    console.log('AirROI summary raw:', JSON.stringify(summaryData).slice(0, 600))
+    const raw = await summaryRes.json() as Record<string, unknown>
+    const s = (raw.data ?? raw) as Record<string, unknown>
 
-    // Unwrap .data wrapper if present
-    const s = (summaryData.data ?? summaryData) as Record<string, unknown>
-
-    // Confirmed field names from live AirROI /markets/summary response:
-    // { occupancy: 0.49, average_daily_rate: 299.5, rev_par: 151.7, ... }
-    const adr = s.average_daily_rate != null ? Number(s.average_daily_rate) : null
-    const occupancy_rate = s.occupancy != null ? Number(s.occupancy) : null
-
-    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}`)
-    return { adr, occupancy_rate }
+    const n = (v: unknown) => (v != null && !isNaN(Number(v)) ? Number(v) : null)
+    const result: AirROIMarketData = {
+      adr:                  n(s.average_daily_rate),
+      occupancy_rate:       n(s.occupancy),
+      rev_par:              n(s.rev_par),
+      booking_lead_time:    n(s.booking_lead_time),
+      avg_length_of_stay:   n(s.length_of_stay),
+      market_min_nights:    n(s.min_nights),
+      active_listings_count: n(s.active_listings_count),
+    }
+    console.log(`AirROI market: ADR $${result.adr}, occ ${result.occupancy_rate}, lead ${result.booking_lead_time}d, LOS ${result.avg_length_of_stay}n, listings ${result.active_listings_count}`)
+    return result
   } catch (err) {
-    console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
-    return { adr: null, occupancy_rate: null }
+    console.warn('AirROI fetch failed:', err instanceof Error ? err.message : String(err))
+    return NULL_MARKET
   }
 }
 
@@ -544,72 +572,99 @@ export async function fetchAirROIComparables(
       return []
     }
 
-    // Confirmed field names from live /listings/comparables response:
-    // listing_info:       { listing_id, listing_name, listing_type, room_type }
-    // location_info:      { latitude, longitude }
-    // property_details:   { bedrooms, baths, guests }
-    // pricing_info:       { cleaning_fee, ... } — NO nightly rate here
-    // ratings:            { rating_overall, num_reviews }
-    // performance_metrics:{ ttm_avg_rate, ttm_occupancy, l90d_avg_rate, l90d_occupancy }
+    // Confirmed live field names from /listings/comparables:
+    // listing_info:        { listing_id, listing_name, listing_type, room_type }
+    // location_info:       { latitude, longitude }
+    // property_details:    { bedrooms, baths, guests }
+    // pricing_info:        { cleaning_fee, extra_guest_fee } — NO nightly_rate
+    // booking_settings:    { min_nights, instant_book, cancellation_policy }
+    // ratings:             { rating_overall, num_reviews }
+    // host_info:           { superhost }
+    // performance_metrics: { ttm_avg_rate, ttm_occupancy, l90d_avg_rate, l90d_occupancy, ttm_revenue }
 
-    return items
+    const n = (v: unknown): number | null => (v != null && !isNaN(Number(v)) ? Number(v) : null)
+    const b = (v: unknown): boolean | null => (v != null ? Boolean(v) : null)
+
+    const mapped = items
       .map((item): CompetitorListing | null => {
-        const listingInfo  = item.listing_info        as Record<string, unknown> | undefined
-        const locationInfo = item.location_info       as Record<string, unknown> | undefined
-        const propDetails  = item.property_details    as Record<string, unknown> | undefined
-        const ratings      = item.ratings             as Record<string, unknown> | undefined
-        const perfMetrics  = item.performance_metrics as Record<string, unknown> | undefined
+        const info     = item.listing_info        as Record<string, unknown> | undefined
+        const loc      = item.location_info       as Record<string, unknown> | undefined
+        const details  = item.property_details    as Record<string, unknown> | undefined
+        const pricing  = item.pricing_info        as Record<string, unknown> | undefined
+        const booking  = item.booking_settings    as Record<string, unknown> | undefined
+        const ratings  = item.ratings             as Record<string, unknown> | undefined
+        const host     = item.host_info           as Record<string, unknown> | undefined
+        const perf     = item.performance_metrics as Record<string, unknown> | undefined
 
-        const id   = String(listingInfo?.listing_id ?? item.id ?? '')
-        const name = String(listingInfo?.listing_name ?? listingInfo?.name ?? '')
+        const id   = String(info?.listing_id ?? item.id ?? '')
+        const name = String(info?.listing_name ?? info?.name ?? '')
 
-        // Price is in performance_metrics — ttm_avg_rate = trailing 12-month avg nightly rate
-        // Fall back to l90d_avg_rate (last 90 days) if ttm isn't available
-        const nightlyRate =
-          typeof perfMetrics?.ttm_avg_rate === 'number' && perfMetrics.ttm_avg_rate > 0
-            ? perfMetrics.ttm_avg_rate
-            : typeof perfMetrics?.l90d_avg_rate === 'number' && perfMetrics.l90d_avg_rate > 0
-            ? perfMetrics.l90d_avg_rate
-            : 0
-
+        // Price: TTM avg rate (trailing 12 months), fallback to last 90 days
+        const nightlyRate = n(perf?.ttm_avg_rate) ?? n(perf?.l90d_avg_rate) ?? 0
         if (nightlyRate <= 0) return null
 
-        const itemLat = typeof locationInfo?.latitude  === 'number' ? locationInfo.latitude  : null
-        const itemLng = typeof locationInfo?.longitude === 'number' ? locationInfo.longitude : null
+        const itemLat = n(loc?.latitude)
+        const itemLng = n(loc?.longitude)
         const distanceMiles = itemLat != null && itemLng != null
           ? Math.round(haversineDistanceMiles(lat, lng, itemLat, itemLng) * 10) / 10
           : null
 
-        const rating =
-          typeof ratings?.rating_overall === 'number' ? ratings.rating_overall : null
-
-        const listingBedrooms =
-          typeof propDetails?.bedrooms === 'number' ? propDetails.bedrooms : null
-
-        // listing_type e.g. "Entire townhouse", room_type e.g. "entire_home"
-        const propertyType = String(listingInfo?.listing_type ?? listingInfo?.room_type ?? '') || null
-
-        // Construct Airbnb URL from listing_id
-        const itemUrl = id ? `https://www.airbnb.com/rooms/${id}` : null
-
         return {
-          listing_id: id,
+          listing_id:         id,
           name,
-          price_per_night: nightlyRate,
-          rating,
-          bedrooms: listingBedrooms,
-          property_type: propertyType,
-          distance_miles: distanceMiles,
-          platform: 'airroi',
-          url: itemUrl,
+          price_per_night:    nightlyRate,
+          rating:             n(ratings?.rating_overall),
+          bedrooms:           n(details?.bedrooms),
+          property_type:      String(info?.listing_type ?? info?.room_type ?? '') || null,
+          distance_miles:     distanceMiles,
+          platform:           'airroi',
+          url:                id ? `https://www.airbnb.com/rooms/${id}` : null,
+          // Fees
+          cleaning_fee:       n(pricing?.cleaning_fee),
+          extra_guest_fee:    n(pricing?.extra_guest_fee),
+          // Booking settings
+          min_nights:         n(booking?.min_nights),
+          instant_book:       b(booking?.instant_book),
+          cancellation_policy: typeof booking?.cancellation_policy === 'string' ? booking.cancellation_policy : null,
+          // Performance
+          ttm_revenue:        n(perf?.ttm_revenue),
+          ttm_occupancy:      n(perf?.ttm_occupancy),
+          l90d_avg_rate:      n(perf?.l90d_avg_rate),
+          l90d_occupancy:     n(perf?.l90d_occupancy),
+          // Host
+          superhost:          b(host?.superhost),
+          num_reviews:        n(ratings?.num_reviews),
         }
       })
       .filter((l): l is CompetitorListing => l !== null)
       .sort((a, b) => (a.distance_miles ?? 99) - (b.distance_miles ?? 99))
+
+    // ── Remove price outliers using IQR method ────────────────────────────────
+    // Keeps listings within [Q1 - 1.5×IQR, Q3 + 1.5×IQR] — standard Tukey fence.
+    // Removes mansions / ultra-budget listings that aren't truly comparable.
+    return filterPriceOutliers(mapped)
   } catch (err) {
     console.warn('AirROI comparables fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
     return []
   }
+}
+
+// ─── Price outlier filter (IQR / Tukey fence) ────────────────────────────────
+// Removes listings whose price is statistically extreme relative to the group.
+// Uses Q1 - 1.5×IQR … Q3 + 1.5×IQR — the standard box-plot whisker method.
+
+function filterPriceOutliers(listings: CompetitorListing[]): CompetitorListing[] {
+  if (listings.length < 4) return listings // too few to filter meaningfully
+  const prices = listings.map(l => l.price_per_night).sort((a, b) => a - b)
+  const q1 = prices[Math.floor(prices.length * 0.25)]
+  const q3 = prices[Math.floor(prices.length * 0.75)]
+  const iqr = q3 - q1
+  const lo = q1 - 1.5 * iqr
+  const hi = q3 + 1.5 * iqr
+  const filtered = listings.filter(l => l.price_per_night >= lo && l.price_per_night <= hi)
+  const removed = listings.length - filtered.length
+  if (removed > 0) console.log(`Outlier filter: removed ${removed} listings (fence $${Math.round(lo)}–$${Math.round(hi)})`)
+  return filtered
 }
 
 // ─── Merge competitor listings from multiple sources ─────────────────────────
@@ -628,7 +683,11 @@ export function mergeCompetitorListings(
 
 export function buildMarketSnapshot(
   listings: CompetitorListing[],
-  airroi: { adr: number | null; occupancy_rate: number | null } = { adr: null, occupancy_rate: null }
+  airroi: AirROIMarketData = {
+    adr: null, occupancy_rate: null, booking_lead_time: null,
+    avg_length_of_stay: null, market_min_nights: null,
+    active_listings_count: null, rev_par: null,
+  }
 ): MarketSnapshot {
   const prices = listings.map((l) => l.price_per_night).sort((a, b) => a - b)
 
@@ -638,15 +697,13 @@ export function buildMarketSnapshot(
     return arr[Math.min(idx, arr.length - 1)]
   }
 
-  const avg =
-    prices.length > 0
-      ? Math.round(prices.reduce((s, p) => s + p, 0) / prices.length)
-      : 0
-  const median = percentile(prices, 50)
+  const avg = prices.length > 0
+    ? Math.round(prices.reduce((s, p) => s + p, 0) / prices.length)
+    : 0
 
   return {
     avg_price: avg,
-    median_price: median,
+    median_price: percentile(prices, 50),
     percentile_25: percentile(prices, 25),
     percentile_75: percentile(prices, 75),
     sample_size: listings.length,
@@ -654,6 +711,11 @@ export function buildMarketSnapshot(
     market_adr: airroi.adr,
     airroi_cached: airroi.adr !== null,
     cached_at: new Date().toISOString(),
+    booking_lead_time: airroi.booking_lead_time,
+    avg_length_of_stay: airroi.avg_length_of_stay,
+    market_min_nights: airroi.market_min_nights,
+    active_listings_count: airroi.active_listings_count,
+    rev_par: airroi.rev_par,
   }
 }
 

@@ -146,8 +146,8 @@ export async function POST(request: Request) {
         // ── AirROI Market Stats ───────────────────────────────────────────────
         const airroiMarket = (
           marketOutcome.status === 'fulfilled' && marketOutcome.value !== null
-            ? marketOutcome.value as { adr: number | null; occupancy_rate: number | null }
-            : { adr: null, occupancy_rate: null }
+            ? marketOutcome.value as import('@/lib/competitor-pricing').AirROIMarketData
+            : { adr: null, occupancy_rate: null, booking_lead_time: null, avg_length_of_stay: null, market_min_nights: null, active_listings_count: null, rev_par: null }
         )
         if (useAirROIMarket) {
           if (marketOutcome.status === 'fulfilled') {

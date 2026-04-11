@@ -71,7 +71,7 @@ export async function GET(request: Request) {
         // Fetch AirROI market stats for ADR + occupancy enrichment
         const airroi = coords
           ? await fetchAirROIMarket(coords.lat, coords.lng, coords.bedrooms)
-          : { adr: null, occupancy_rate: null }
+          : undefined
 
         const market = buildMarketSnapshot(mergedListings, airroi)
 
