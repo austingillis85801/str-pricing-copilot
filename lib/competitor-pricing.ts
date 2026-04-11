@@ -155,6 +155,17 @@ export async function fetchApifyResults(
   }
 
   return items
+    .filter((item) => {
+      // Only keep entire-home listings (houses, condos, cabins, townhouses).
+      // Exclude campsites, tents, yurts, hotel rooms, shared spaces, etc.
+      const pt = typeof item.propertyType === 'string' ? item.propertyType : ''
+      const rt = typeof item.roomType === 'string' ? item.roomType : ''
+      // Must be an "Entire X" property type OR roomType "Entire home/apt"
+      const isEntireProperty = pt.startsWith('Entire') || rt === 'Entire home/apt'
+      // Double-check: exclude known non-house property types even if they slipped through
+      const isExcluded = /camp|tent|yurt|dome|rv|camper|hostel|hotel|resort|shared|farm stay/i.test(pt)
+      return isEntireProperty && !isExcluded
+    })
     .map((item) => ({
       listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
       name: String(item.title ?? item.name ?? ''),
