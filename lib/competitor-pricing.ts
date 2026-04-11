@@ -48,7 +48,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 async function fetchApifyCompetitors(
   lat: number,
   lng: number,
-  radiusMiles = 10,
+  _radiusMiles = 10,
   maxListings = 40
 ): Promise<CompetitorListing[]> {
   const token = process.env.APIFY_TOKEN
