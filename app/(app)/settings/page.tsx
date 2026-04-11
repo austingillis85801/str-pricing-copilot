@@ -6,6 +6,127 @@ import { AMENITIES } from '@/lib/types'
 import type { Property, PropertyFormData, Platform, CsvImport } from '@/lib/types'
 import { format } from 'date-fns'
 
+// ─── Apify Billing Section ────────────────────────────────────────────────────
+
+const APIFY_SUBSCRIPTION_USD = 30 // hardcoded monthly plan cost
+
+interface ApifyUsage {
+  usageUsd: number
+  cycleStart: string | null
+  cycleEnd: string | null
+}
+
+function ApifyBillingSection() {
+  const [usage, setUsage] = useState<ApifyUsage | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/apify-usage')
+      .then((r) => (r.ok ? r.json() : r.json().then((e: { error?: string }) => Promise.reject(e.error ?? 'Failed'))))
+      .then((data: ApifyUsage) => setUsage(data))
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const totalUsd = APIFY_SUBSCRIPTION_USD + (usage?.usageUsd ?? 0)
+
+  function fmt(n: number) {
+    return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
+  }
+
+  function fmtDate(s: string | null) {
+    if (!s) return '—'
+    return format(new Date(s), 'MMM d, yyyy')
+  }
+
+  return (
+    <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
+      <div className="flex items-start gap-3 mb-5">
+        <div className="w-9 h-9 bg-orange-500/15 rounded-lg flex items-center justify-center shrink-0 mt-0.5">
+          <svg className="w-5 h-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-white">API Costs — This Month</h2>
+          <p className="text-slate-400 text-sm mt-0.5">
+            Competitor pricing data is powered by Apify. Usage updates in real time from your account.
+          </p>
+        </div>
+      </div>
+
+      {/* Cost breakdown */}
+      <div className="bg-slate-800/60 rounded-xl border border-slate-700/40 overflow-hidden mb-4">
+        <div className="divide-y divide-slate-700/40">
+          {/* Subscription line */}
+          <div className="flex items-center justify-between px-4 py-3">
+            <div>
+              <p className="text-sm font-medium text-white">Apify — Monthly Subscription</p>
+              <p className="text-xs text-slate-400 mt-0.5">Starter plan · renews monthly</p>
+            </div>
+            <span className="text-sm font-semibold text-white">{fmt(APIFY_SUBSCRIPTION_USD)}</span>
+          </div>
+
+          {/* Usage line */}
+          <div className="flex items-center justify-between px-4 py-3">
+            <div>
+              <p className="text-sm font-medium text-white">Apify — Compute Usage</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {loading
+                  ? 'Loading…'
+                  : usage?.cycleStart
+                  ? `Cycle: ${fmtDate(usage.cycleStart)} – ${fmtDate(usage.cycleEnd)}`
+                  : 'Current billing cycle'}
+              </p>
+            </div>
+            <span className="text-sm font-semibold text-white">
+              {loading ? (
+                <span className="inline-block w-12 h-4 bg-slate-700 rounded animate-pulse" />
+              ) : error ? (
+                <span className="text-slate-500 text-xs">unavailable</span>
+              ) : (
+                fmt(usage?.usageUsd ?? 0)
+              )}
+            </span>
+          </div>
+
+          {/* Total */}
+          <div className="flex items-center justify-between px-4 py-3.5 bg-slate-700/30">
+            <p className="text-sm font-semibold text-white">Estimated Total</p>
+            <span className="text-base font-bold text-white">
+              {loading ? (
+                <span className="inline-block w-16 h-5 bg-slate-600 rounded animate-pulse" />
+              ) : (
+                fmt(loading ? APIFY_SUBSCRIPTION_USD : totalUsd)
+              )}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-xs text-slate-500 mb-4">
+          Could not fetch live usage from Apify — check that <code className="bg-slate-800 px-1 rounded">APIFY_TOKEN</code> is set in Vercel environment variables.
+        </p>
+      )}
+
+      {/* Info note */}
+      <div className="flex items-start gap-2.5 bg-orange-500/5 border border-orange-500/20 rounded-lg px-4 py-3">
+        <svg className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <p className="text-xs text-orange-300/80 leading-relaxed">
+          Competitor data refreshes every 4 days via cron. Each run scrapes ~20 Airbnb listings per property.
+          At current cadence, compute usage should stay well under $5/month on top of the subscription.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface EmailLogEntry {
   id: string
   subject: string
@@ -529,8 +650,12 @@ export default function SettingsPage() {
         />
       </div>
 
+      <div className="space-y-6">
       {/* Email Digest */}
       <EmailDigestSection />
+
+      {/* Apify Billing */}
+      <ApifyBillingSection />
 
       {/* Import history */}
       <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
@@ -580,6 +705,7 @@ export default function SettingsPage() {
             </table>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

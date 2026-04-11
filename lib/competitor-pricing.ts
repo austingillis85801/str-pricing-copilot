@@ -59,7 +59,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 async function fetchApifyCompetitors(
   airbnbSearchUrl: string,
-  maxListings = 40
+  maxListings = 20
 ): Promise<CompetitorListing[]> {
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
