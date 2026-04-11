@@ -7,6 +7,8 @@ export const PROPERTY_COORDS: Record<string, {
   lng: number
   label: string
   bedrooms: number
+  baths: number
+  guests: number
   maxMiles: number
   airbnbSearchUrl: string
 }> = {
@@ -16,6 +18,8 @@ export const PROPERTY_COORDS: Record<string, {
     lng: -109.4892,
     label: 'Moab, UT',
     bedrooms: 2,
+    baths: 2,
+    guests: 4,
     maxMiles: 5,
     // ±1 bedroom: min 1, max 3
     airbnbSearchUrl: 'https://www.airbnb.com/s/Moab--UT--United-States/homes?adults=2&place_id=ChIJV2lfFqGZUIcR6e7cqvpJSFw&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt&min_bedrooms=1&max_bedrooms=3',
@@ -26,6 +30,8 @@ export const PROPERTY_COORDS: Record<string, {
     lng: -111.3986,
     label: 'Bear Lake, UT',
     bedrooms: 4,
+    baths: 3,
+    guests: 8,
     maxMiles: 5,
     // ±1 bedroom: min 3, max 5
     airbnbSearchUrl: 'https://www.airbnb.com/s/Garden-City--UT--United-States/homes?adults=2&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt&min_bedrooms=3&max_bedrooms=5',
@@ -42,7 +48,7 @@ export interface CompetitorListing {
   bedrooms: number | null
   property_type: string | null
   distance_miles: number | null
-  platform: 'airbnb'
+  platform: 'airbnb' | 'airroi'
   url: string | null
 }
 
@@ -490,6 +496,129 @@ export async function fetchAirROIMarket(
     console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
     return { adr: null, occupancy_rate: null }
   }
+}
+
+// ─── AirROI — Comparable listings ────────────────────────────────────────────
+//
+// GET /listings/comparables?latitude=&longitude=&bedrooms=&baths=&guests=
+// Returns individual comparable properties near our property with pricing data.
+// Can supplement or replace Apify when Apify hits spending limits.
+
+export async function fetchAirROIComparables(
+  lat: number,
+  lng: number,
+  bedrooms: number,
+  baths: number,
+  guests: number
+): Promise<CompetitorListing[]> {
+  const apiKey = process.env.AIRROI_API_KEY
+  if (!apiKey) {
+    console.log('AirROI comparables: AIRROI_API_KEY not set, skipping')
+    return []
+  }
+
+  try {
+    const url = `${AIRROI_BASE}/listings/comparables?latitude=${lat}&longitude=${lng}&bedrooms=${bedrooms}&baths=${baths}&guests=${guests}&currency=usd`
+    const res = await fetch(url, {
+      headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    })
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      console.warn(`AirROI /listings/comparables error ${res.status}: ${body}`)
+      return []
+    }
+
+    const data = await res.json() as Record<string, unknown>
+    console.log('AirROI comparables raw keys:', Object.keys(data))
+
+    // Response may be { listings: [...] } or { data: { listings: [...] } } or an array directly
+    const raw = data.listings ?? (data.data as Record<string, unknown>)?.listings ?? data
+    const items: Record<string, unknown>[] = Array.isArray(raw) ? raw : []
+
+    if (items.length > 0) {
+      console.log('AirROI comparables first item keys:', Object.keys(items[0]))
+    } else {
+      console.warn('AirROI comparables returned 0 items')
+      return []
+    }
+
+    return items
+      .map((item): CompetitorListing | null => {
+        // listing_info, location_info, property_details, pricing_info, ratings
+        const listingInfo = item.listing_info as Record<string, unknown> | undefined
+        const locationInfo = item.location_info as Record<string, unknown> | undefined
+        const propertyDetails = item.property_details as Record<string, unknown> | undefined
+        const pricingInfo = item.pricing_info as Record<string, unknown> | undefined
+        const ratings = item.ratings as Record<string, unknown> | undefined
+
+        const id = String(item.id ?? item.listing_id ?? '')
+        const name = String(listingInfo?.name ?? item.name ?? item.title ?? '')
+
+        // Extract nightly rate from pricing_info
+        const nightlyRate =
+          typeof pricingInfo?.nightly_rate === 'number' ? pricingInfo.nightly_rate :
+          typeof pricingInfo?.rate === 'number' ? pricingInfo.rate :
+          typeof pricingInfo?.price === 'number' ? pricingInfo.price :
+          typeof item.nightly_rate === 'number' ? item.nightly_rate :
+          0
+
+        if (nightlyRate <= 0) return null
+
+        // Distance from our property
+        const itemLat = typeof locationInfo?.latitude === 'number' ? locationInfo.latitude : null
+        const itemLng = typeof locationInfo?.longitude === 'number' ? locationInfo.longitude : null
+        const distanceMiles = itemLat != null && itemLng != null
+          ? Math.round(haversineDistanceMiles(lat, lng, itemLat, itemLng) * 10) / 10
+          : null
+
+        const rating =
+          typeof ratings?.overall === 'number' ? ratings.overall :
+          typeof item.rating === 'number' ? item.rating :
+          null
+
+        const listingBedrooms =
+          typeof propertyDetails?.bedrooms === 'number' ? propertyDetails.bedrooms :
+          typeof item.bedrooms === 'number' ? item.bedrooms :
+          null
+
+        const propertyType = String(
+          propertyDetails?.property_type ?? listingInfo?.room_type ?? item.property_type ?? ''
+        ) || null
+
+        const itemUrl = String(listingInfo?.url ?? item.url ?? '') || null
+
+        return {
+          listing_id: id,
+          name,
+          price_per_night: nightlyRate,
+          rating,
+          bedrooms: listingBedrooms,
+          property_type: propertyType,
+          distance_miles: distanceMiles,
+          platform: 'airroi',
+          url: itemUrl,
+        }
+      })
+      .filter((l): l is CompetitorListing => l !== null)
+      .sort((a, b) => (a.distance_miles ?? 99) - (b.distance_miles ?? 99))
+  } catch (err) {
+    console.warn('AirROI comparables fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
+    return []
+  }
+}
+
+// ─── Merge competitor listings from multiple sources ─────────────────────────
+// Deduplicates by listing_id — Apify takes priority over AirROI for same ID.
+
+export function mergeCompetitorListings(
+  primary: CompetitorListing[],   // higher priority (Apify)
+  secondary: CompetitorListing[]  // fills gaps (AirROI)
+): CompetitorListing[] {
+  const seen = new Set(primary.map((l) => l.listing_id).filter(Boolean))
+  const extras = secondary.filter((l) => !l.listing_id || !seen.has(l.listing_id))
+  return [...primary, ...extras].sort((a, b) => (a.distance_miles ?? 99) - (b.distance_miles ?? 99))
 }
 
 // ─── Market stats from listing prices ────────────────────────────────────────

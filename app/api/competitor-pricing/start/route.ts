@@ -5,6 +5,7 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 import {
   startApifyRun,
   fetchAirROIMarket,
+  fetchAirROIComparables,
   buildMarketSnapshot,
   writeCache,
   PROPERTY_COORDS,
@@ -20,41 +21,63 @@ export interface AirROIResult {
   error?: string
 }
 
+export interface AirROIComparableResult {
+  propertyName: string
+  slug: string
+  success: boolean
+  count: number
+  error?: string
+}
+
 /**
  * POST /api/competitor-pricing/start
  *
- * Kicks off Apify actor runs AND AirROI market calls IN PARALLEL for each property.
- * The two services are fully decoupled — if one fails the other still runs.
+ * Kicks off data collection for each property using the selected sources.
+ * All services run in parallel and are fully decoupled — if one fails the others still run.
  *
- * Optional JSON body: { slugs: ['moab'] } — limits to specific properties.
+ * Body: {
+ *   slugs?:   string[]  — limit to specific properties (default: all)
+ *   sources?: string[]  — which services to use (default: all)
+ *                         values: 'apify' | 'airroi-comparables' | 'airroi-market'
+ * }
  *
  * Returns:
- *   { runs }         — Apify run IDs (caller polls /api/competitor-pricing/poll)
- *   { apifyErrors }  — per-property Apify start failures with reason
- *   { airroiResults} — per-property AirROI results (success + data OR failure + reason)
+ *   runs                  — Apify run IDs (caller polls /api/competitor-pricing/poll)
+ *   apifyErrors           — per-property Apify start failures with reason
+ *   airroiResults         — per-property AirROI market stats results
+ *   airroiComparableResults — per-property AirROI comparable listings results
  */
 export async function POST(request: Request) {
   const session = await getServerSession(authOptions)
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Parse optional slug filter from request body
+  // Parse body — slugs filter + sources selector
   let slugFilter: string[] | null = null
+  let enabledSources: string[] = ['apify', 'airroi-comparables', 'airroi-market']
   try {
-    const body = await request.json() as { slugs?: string[] }
+    const body = await request.json() as { slugs?: string[]; sources?: string[] }
     if (Array.isArray(body.slugs) && body.slugs.length > 0) slugFilter = body.slugs
+    if (Array.isArray(body.sources) && body.sources.length > 0) enabledSources = body.sources
   } catch {
-    // No body or invalid JSON — refresh all (default behaviour)
+    // No body or invalid JSON — use defaults
   }
+
+  const useApify = enabledSources.includes('apify')
+  const useAirROIComparables = enabledSources.includes('airroi-comparables')
+  const useAirROIMarket = enabledSources.includes('airroi-market')
 
   try {
     const supabase = createServerSupabaseClient()
     const { data: properties } = await supabase.from('properties').select('*')
 
     if (!properties?.length) {
-      return NextResponse.json({ success: true, runs: [], apifyErrors: [], airroiResults: [], message: 'No properties found' })
+      return NextResponse.json({
+        success: true, runs: [], apifyErrors: [],
+        airroiResults: [], airroiComparableResults: [],
+        message: 'No properties found',
+      })
     }
 
-    // Build filtered list of properties to process
     const toProcess = (properties as Property[])
       .map((prop) => {
         const slug = prop.name.toLowerCase().includes('moab') ? 'moab' : 'bear-lake'
@@ -68,69 +91,99 @@ export async function POST(request: Request) {
     const runs: { propertyId: string; propertyName: string; slug: string; runId: string }[] = []
     const apifyErrors: { propertyName: string; error: string }[] = []
     const airroiResults: AirROIResult[] = []
+    const airroiComparableResults: AirROIComparableResult[] = []
 
-    // ── Run Apify AND AirROI fully in parallel across all properties ──────────
-    // Each property fires both its Apify start and its AirROI call concurrently.
-    // A failure in one service does NOT cancel the other.
     await Promise.all(
       toProcess.map(async ({ prop, slug, coords }) => {
-        const [apifyOutcome, airroiOutcome] = await Promise.allSettled([
-          startApifyRun(coords.airbnbSearchUrl),
-          fetchAirROIMarket(coords.lat, coords.lng, coords.bedrooms),
+        // Build the list of tasks to run concurrently for this property
+        const tasks = await Promise.allSettled([
+          useApify
+            ? startApifyRun(coords.airbnbSearchUrl)
+            : Promise.resolve(null),
+          useAirROIComparables
+            ? fetchAirROIComparables(coords.lat, coords.lng, coords.bedrooms, coords.baths, coords.guests)
+            : Promise.resolve(null),
+          useAirROIMarket
+            ? fetchAirROIMarket(coords.lat, coords.lng, coords.bedrooms)
+            : Promise.resolve(null),
         ])
 
-        // ── Apify result ──────────────────────────────────────────────────────
-        if (apifyOutcome.status === 'fulfilled') {
-          runs.push({
-            propertyId: prop.id,
-            propertyName: prop.name,
-            slug,
-            runId: apifyOutcome.value,
-          })
-        } else {
-          const reason = apifyOutcome.reason
-          apifyErrors.push({
-            propertyName: prop.name,
-            error: reason instanceof Error ? reason.message : String(reason),
-          })
+        const [apifyOutcome, comparablesOutcome, marketOutcome] = tasks
+
+        // ── Apify ────────────────────────────────────────────────────────────
+        if (useApify) {
+          if (apifyOutcome.status === 'fulfilled' && apifyOutcome.value !== null) {
+            runs.push({ propertyId: prop.id, propertyName: prop.name, slug, runId: apifyOutcome.value as string })
+          } else if (apifyOutcome.status === 'rejected') {
+            const reason = apifyOutcome.reason
+            apifyErrors.push({
+              propertyName: prop.name,
+              error: reason instanceof Error ? reason.message : String(reason),
+            })
+          }
         }
 
-        // ── AirROI result ─────────────────────────────────────────────────────
-        if (airroiOutcome.status === 'fulfilled') {
-          const airroi = airroiOutcome.value
-          airroiResults.push({
-            propertyName: prop.name,
-            slug,
-            success: true,
-            adr: airroi.adr,
-            occupancy_rate: airroi.occupancy_rate,
-          })
-
-          // Cache AirROI market data immediately — even if Apify failed.
-          // The poll route will overwrite this with the full snapshot (competitors
-          // + AirROI) once Apify finishes. If Apify never finishes, this partial
-          // cache ensures the digest and date slide-over still get market data.
-          try {
-            const market = buildMarketSnapshot([], airroi)
-            await writeCache(prop.id, slug, [], market)
-          } catch {
-            // Non-fatal — AirROI result is still returned in response
+        // ── AirROI Comparables ────────────────────────────────────────────────
+        const comparableListings = (
+          comparablesOutcome.status === 'fulfilled' && Array.isArray(comparablesOutcome.value)
+            ? comparablesOutcome.value
+            : []
+        )
+        if (useAirROIComparables) {
+          if (comparablesOutcome.status === 'fulfilled') {
+            airroiComparableResults.push({
+              propertyName: prop.name, slug, success: true, count: comparableListings.length,
+            })
+          } else {
+            const reason = comparablesOutcome.reason
+            airroiComparableResults.push({
+              propertyName: prop.name, slug, success: false, count: 0,
+              error: reason instanceof Error ? reason.message : String(reason),
+            })
           }
-        } else {
-          const reason = airroiOutcome.reason
-          airroiResults.push({
-            propertyName: prop.name,
-            slug,
-            success: false,
-            adr: null,
-            occupancy_rate: null,
-            error: reason instanceof Error ? reason.message : String(reason),
-          })
+        }
+
+        // ── AirROI Market Stats ───────────────────────────────────────────────
+        const airroiMarket = (
+          marketOutcome.status === 'fulfilled' && marketOutcome.value !== null
+            ? marketOutcome.value as { adr: number | null; occupancy_rate: number | null }
+            : { adr: null, occupancy_rate: null }
+        )
+        if (useAirROIMarket) {
+          if (marketOutcome.status === 'fulfilled') {
+            airroiResults.push({
+              propertyName: prop.name, slug, success: true,
+              adr: airroiMarket.adr, occupancy_rate: airroiMarket.occupancy_rate,
+            })
+          } else {
+            const reason = marketOutcome.reason
+            airroiResults.push({
+              propertyName: prop.name, slug, success: false, adr: null, occupancy_rate: null,
+              error: reason instanceof Error ? reason.message : String(reason),
+            })
+          }
+        }
+
+        // ── Write immediate cache ─────────────────────────────────────────────
+        // If AirROI comparables or market data succeeded, cache immediately so
+        // the app has data even if Apify never finishes.
+        const hasComparables = comparableListings.length > 0
+        const hasMarket = airroiMarket.adr !== null || airroiMarket.occupancy_rate !== null
+
+        if ((hasComparables || hasMarket) && !useApify) {
+          // Apify is off — write AirROI-only cache as the final result
+          const market = buildMarketSnapshot(comparableListings, airroiMarket)
+          await writeCache(prop.id, slug, comparableListings, market).catch(() => null)
+        } else if (hasComparables || hasMarket) {
+          // Apify is on but may take time — write partial cache now so market
+          // data is available immediately. Poll route will overwrite with merged result.
+          const market = buildMarketSnapshot(comparableListings, airroiMarket)
+          await writeCache(prop.id, slug, comparableListings, market).catch(() => null)
         }
       })
     )
 
-    return NextResponse.json({ success: true, runs, apifyErrors, airroiResults })
+    return NextResponse.json({ success: true, runs, apifyErrors, airroiResults, airroiComparableResults })
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 })
   }

@@ -127,61 +127,124 @@ function ApifyBillingSection() {
 }
 
 // ─── Market Data Refresh Section ──────────────────────────────────────────────
-// Uses async start/poll pattern to avoid Vercel's 60s function timeout:
-//   1. POST /api/competitor-pricing/start → kicks off Apify runs, returns run IDs (~2s)
-//   2. GET /api/competitor-pricing/poll → checks status every 10s from the browser
-//   3. When all runs finish, results are cached in Supabase automatically
 
-interface RunEntry {
-  propertyId: string
-  propertyName: string
-  slug: string
-  runId: string
+interface DataSources {
+  apify: boolean
+  airroiComparables: boolean
+  airroiMarket: boolean
 }
 
-interface PollResult {
-  runId: string
-  propertyId: string
-  slug: string
-  status: string
-  listings?: number
-  error?: string
+const DEFAULT_SOURCES: DataSources = { apify: true, airroiComparables: true, airroiMarket: true }
+const SOURCES_KEY = 'dataSourceConfig'
+
+function loadSources(): DataSources {
+  if (typeof window === 'undefined') return DEFAULT_SOURCES
+  try {
+    const raw = localStorage.getItem(SOURCES_KEY)
+    if (!raw) return DEFAULT_SOURCES
+    return { ...DEFAULT_SOURCES, ...JSON.parse(raw) }
+  } catch { return DEFAULT_SOURCES }
 }
 
-interface AirROIResult {
-  propertyName: string
-  slug: string
-  success: boolean
-  adr: number | null
-  occupancy_rate: number | null
-  error?: string
+function saveSources(s: DataSources) {
+  try { localStorage.setItem(SOURCES_KEY, JSON.stringify(s)) } catch { /* ignore */ }
 }
+
+function Toggle({ enabled, onChange, label, sublabel }: {
+  enabled: boolean
+  onChange: (v: boolean) => void
+  label: string
+  sublabel: string
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-white">{label}</p>
+        <p className="text-xs text-slate-400 mt-0.5">{sublabel}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => onChange(!enabled)}
+        className={`relative shrink-0 w-10 h-5.5 rounded-full transition-colors duration-200 focus:outline-none ${
+          enabled ? 'bg-blue-500' : 'bg-slate-600'
+        }`}
+        style={{ height: '22px', width: '40px' }}
+        aria-checked={enabled}
+        role="switch"
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 w-4.5 h-4.5 bg-white rounded-full shadow transition-transform duration-200 ${
+            enabled ? 'translate-x-[18px]' : 'translate-x-0'
+          }`}
+          style={{ width: '18px', height: '18px' }}
+        />
+      </button>
+    </div>
+  )
+}
+
+function sourcesDescription(s: DataSources): string {
+  const on = [s.apify && 'Apify', s.airroiComparables && 'AirROI Comparables', s.airroiMarket && 'AirROI Market Stats'].filter(Boolean)
+  if (on.length === 0) return 'No sources selected — enable at least one below.'
+  if (s.apify && s.airroiComparables) return 'Combined mode: Apify + AirROI listings merged for maximum accuracy. AirROI fills gaps when Apify hits its limit.'
+  if (s.apify) return 'Apify only — scraping live Airbnb listings. AirROI comparables disabled.'
+  if (s.airroiComparables) return 'AirROI comparables only — instant comparable listings without Apify cost.'
+  return `${on.join(' + ')} enabled.`
+}
+
+interface RunEntry { propertyId: string; propertyName: string; slug: string; runId: string }
+interface PollResult { runId: string; propertyId: string; slug: string; status: string; listings?: number; airroiMerged?: number; error?: string }
+interface AirROIResult { propertyName: string; slug: string; success: boolean; adr: number | null; occupancy_rate: number | null; error?: string }
+interface AirROIComparableResult { propertyName: string; slug: string; success: boolean; count: number; error?: string }
 
 function MarketDataSection() {
+  const [sources, setSources] = useState<DataSources>(DEFAULT_SOURCES)
   const [phase, setPhase] = useState<'idle' | 'starting' | 'polling' | 'done' | 'error'>('idle')
   const [runs, setRuns] = useState<RunEntry[]>([])
   const [pollResults, setPollResults] = useState<PollResult[]>([])
   const [apifyErrors, setApifyErrors] = useState<{ propertyName: string; error: string }[]>([])
   const [airroiResults, setAirroiResults] = useState<AirROIResult[]>([])
+  const [airroiComparableResults, setAirroiComparableResults] = useState<AirROIComparableResult[]>([])
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
 
-  // slugs = null means "refresh all"; ['moab'] or ['bear-lake'] = single property
+  // Load persisted source toggles on mount
+  useEffect(() => { setSources(loadSources()) }, [])
+
+  function updateSource(key: keyof DataSources, value: boolean) {
+    const next = { ...sources, [key]: value }
+    setSources(next)
+    saveSources(next)
+  }
+
+  function buildSourcesList(s: DataSources): string[] {
+    const list: string[] = []
+    if (s.apify) list.push('apify')
+    if (s.airroiComparables) list.push('airroi-comparables')
+    if (s.airroiMarket) list.push('airroi-market')
+    return list
+  }
+
   async function handleRefresh(slugs: string[] | null = null) {
+    const enabledSources = buildSourcesList(sources)
+    if (enabledSources.length === 0) {
+      setFatalError('No data sources selected. Enable at least one source below before refreshing.')
+      return
+    }
+
     setPhase('starting')
     setFatalError(null)
     setPollResults([])
     setApifyErrors([])
     setAirroiResults([])
+    setAirroiComparableResults([])
     setElapsed(0)
 
     try {
-      // Step 1 — start Apify runs AND call AirROI in parallel (both independent)
-      const body = slugs ? JSON.stringify({ slugs }) : undefined
       const startRes = await fetch('/api/competitor-pricing/start', {
         method: 'POST',
-        headers: body ? { 'Content-Type': 'application/json' } : undefined,
-        body,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...(slugs ? { slugs } : {}), sources: enabledSources }),
       })
       if (!startRes.ok) {
         const errData = await startRes.json().catch(() => ({ error: 'Start request failed' })) as { error?: string }
@@ -192,17 +255,16 @@ function MarketDataSection() {
         runs: RunEntry[]
         apifyErrors?: { propertyName: string; error: string }[]
         airroiResults?: AirROIResult[]
+        airroiComparableResults?: AirROIComparableResult[]
         error?: string
       }
       if (!startData.success) throw new Error(startData.error ?? 'Unknown error from start route')
 
-      // Capture AirROI results immediately — they're done now regardless of Apify
       setAirroiResults(startData.airroiResults ?? [])
+      setAirroiComparableResults(startData.airroiComparableResults ?? [])
       setApifyErrors(startData.apifyErrors ?? [])
 
       if ((startData.runs ?? []).length === 0) {
-        // No Apify runs started — AirROI may still have succeeded
-        // Show results and stop here (no polling needed)
         setPhase('done')
         return
       }
@@ -210,40 +272,28 @@ function MarketDataSection() {
       setRuns(startData.runs)
       setPhase('polling')
 
-      // Step 2 — poll Apify every 10s from the browser
-      const runsParam = startData.runs
-        .map((r) => `${r.runId}:${r.propertyId}:${r.slug}`)
-        .join(',')
-
+      const runsParam = startData.runs.map((r) => `${r.runId}:${r.propertyId}:${r.slug}`).join(',')
       const startTime = Date.now()
       const maxPollTime = 5 * 60 * 1000
 
       const poll = async (): Promise<void> => {
         const elapsedMs = Date.now() - startTime
         setElapsed(Math.round(elapsedMs / 1000))
-
         if (elapsedMs > maxPollTime) {
-          setPhase('done') // still show AirROI results
-          setFatalError('Apify timed out after 5 minutes — competitor listings may still be processing. AirROI market data above was saved.')
+          setPhase('done')
+          setFatalError('Apify timed out after 5 minutes — AirROI data above was saved. Competitor listings may still be processing.')
           return
         }
-
         try {
           const pollRes = await fetch(`/api/competitor-pricing/poll?runs=${encodeURIComponent(runsParam)}`)
           if (!pollRes.ok) throw new Error(`Poll failed: HTTP ${pollRes.status}`)
-
           const pollData = await pollRes.json() as { allDone: boolean; results: PollResult[] }
           setPollResults(pollData.results)
-
-          if (pollData.allDone) {
-            setPhase('done')
-            return
-          }
-
+          if (pollData.allDone) { setPhase('done'); return }
           await new Promise((resolve) => setTimeout(resolve, 10_000))
           return poll()
         } catch (err) {
-          setPhase('done') // still show AirROI results
+          setPhase('done')
           setFatalError(err instanceof Error ? err.message : 'Polling failed')
         }
       }
@@ -256,13 +306,13 @@ function MarketDataSection() {
   }
 
   const isActive = phase === 'starting' || phase === 'polling'
+  const hasAnyResults = airroiResults.length > 0 || airroiComparableResults.length > 0 || pollResults.length > 0 || apifyErrors.length > 0
 
   const RefreshIcon = () => (
     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
     </svg>
   )
-
   const SpinIcon = () => (
     <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -270,17 +320,14 @@ function MarketDataSection() {
     </svg>
   )
 
-  const hasAnyResults = airroiResults.length > 0 || pollResults.length > 0 || apifyErrors.length > 0
-
   return (
     <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
+
+      {/* Header + refresh button */}
       <div className="flex items-start justify-between gap-4 mb-4">
         <div>
           <h2 className="text-lg font-semibold text-white">Competitor Market Data</h2>
-          <p className="text-slate-400 text-sm mt-0.5">
-            Apify scrapes live Airbnb listings. AirROI provides market ADR &amp; occupancy.
-            Both run independently — if one fails the other still updates.
-          </p>
+          <p className="text-slate-400 text-sm mt-0.5">{sourcesDescription(sources)}</p>
         </div>
         <button
           type="button"
@@ -288,12 +335,35 @@ function MarketDataSection() {
           disabled={isActive}
           className="shrink-0 flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-700/50 text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
         >
-          {isActive ? (
-            <><SpinIcon />{phase === 'starting' ? 'Starting…' : `Polling… ${elapsed}s`}</>
-          ) : (
-            <><RefreshIcon />Refresh Both</>
-          )}
+          {isActive
+            ? <><SpinIcon />{phase === 'starting' ? 'Starting…' : `Polling… ${elapsed}s`}</>
+            : <><RefreshIcon />Sync Now</>}
         </button>
+      </div>
+
+      {/* Data source toggles */}
+      <div className="bg-slate-800/50 border border-slate-700/40 rounded-xl p-4 mb-4 space-y-3">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Data Sources</p>
+        <Toggle
+          enabled={sources.apify}
+          onChange={(v) => updateSource('apify', v)}
+          label="Apify — Live Airbnb Scraper"
+          sublabel="Scrapes real listings with actual nightly prices. Costs ~$0.10–0.50/run. Has monthly spending limits."
+        />
+        <div className="border-t border-slate-700/40" />
+        <Toggle
+          enabled={sources.airroiComparables}
+          onChange={(v) => updateSource('airroiComparables', v)}
+          label="AirROI — Comparable Listings"
+          sublabel="Returns nearby comparable properties with pricing data. Instant, no scraping, uses AirROI credits."
+        />
+        <div className="border-t border-slate-700/40" />
+        <Toggle
+          enabled={sources.airroiMarket}
+          onChange={(v) => updateSource('airroiMarket', v)}
+          label="AirROI — Market Stats"
+          sublabel="Aggregate ADR &amp; occupancy rate for your market. One API call per property per sync."
+        />
       </div>
 
       {/* Per-property buttons */}
@@ -316,9 +386,7 @@ function MarketDataSection() {
       {/* Apify polling progress */}
       {phase === 'polling' && (
         <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg px-4 py-3 mb-4">
-          <p className="text-blue-300 text-sm font-medium">
-            Apify scraping… ({elapsed}s)
-          </p>
+          <p className="text-blue-300 text-sm font-medium">Apify scraping… ({elapsed}s)</p>
           <p className="text-blue-400/70 text-xs mt-0.5">
             Scraping {runs.length} propert{runs.length === 1 ? 'y' : 'ies'} — typically 1–3 minutes. Keep this tab open.
           </p>
@@ -326,17 +394,16 @@ function MarketDataSection() {
             <div className="mt-3 space-y-1.5">
               {pollResults.map((r) => (
                 <div key={r.runId} className="flex items-center gap-2">
-                  {r.status === 'RUNNING' || r.status === 'READY' ? (
-                    <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
-                  ) : r.status === 'SUCCEEDED' ? (
-                    <span className="w-2 h-2 bg-emerald-400 rounded-full" />
-                  ) : (
-                    <span className="w-2 h-2 bg-red-400 rounded-full" />
-                  )}
+                  {r.status === 'RUNNING' || r.status === 'READY'
+                    ? <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+                    : r.status === 'SUCCEEDED'
+                    ? <span className="w-2 h-2 bg-emerald-400 rounded-full" />
+                    : <span className="w-2 h-2 bg-red-400 rounded-full" />}
                   <span className="text-xs text-slate-300">
                     {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
                     {' — '}
-                    {r.status === 'SUCCEEDED' ? `Done (${r.listings} listings)`
+                    {r.status === 'SUCCEEDED'
+                      ? `${r.listings} listings${r.airroiMerged ? ` (${r.airroiMerged} from AirROI merged)` : ''}`
                       : r.status === 'RUNNING' || r.status === 'READY' ? 'Running…' : r.status}
                   </span>
                 </div>
@@ -346,65 +413,70 @@ function MarketDataSection() {
         </div>
       )}
 
-      {/* Results — shown after start completes (AirROI is instant; Apify takes longer) */}
+      {/* Results */}
       {(phase === 'done' || phase === 'error' || phase === 'starting') && hasAnyResults && (
         <div className="space-y-3 mb-4">
 
-          {/* ── AirROI section ── */}
+          {/* AirROI Market Stats */}
           {airroiResults.length > 0 && (
             <div>
-              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">AirROI Market Data</p>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">AirROI Market Stats</p>
               <div className="space-y-1.5">
                 {airroiResults.map((r) => (
-                  <div
-                    key={r.propertyName}
-                    className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${
-                      r.success ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'
-                    }`}
-                  >
+                  <div key={r.propertyName} className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${r.success ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'}`}>
                     <div>
-                      <p className={`text-sm font-medium ${r.success ? 'text-emerald-300' : 'text-red-300'}`}>
-                        {r.propertyName}
-                      </p>
-                      {r.success ? (
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {r.adr != null ? `ADR $${Math.round(r.adr)}` : 'ADR n/a'}
-                          {' · '}
-                          {r.occupancy_rate != null ? `${Math.round(r.occupancy_rate * 100)}% occupancy` : 'occupancy n/a'}
-                        </p>
-                      ) : (
-                        <p className="text-xs text-red-400/80 mt-0.5 break-all">{r.error}</p>
-                      )}
+                      <p className={`text-sm font-medium ${r.success ? 'text-emerald-300' : 'text-red-300'}`}>{r.propertyName}</p>
+                      {r.success
+                        ? <p className="text-xs text-slate-400 mt-0.5">
+                            {r.adr != null ? `ADR $${Math.round(r.adr)}` : 'ADR n/a'} · {r.occupancy_rate != null ? `${Math.round(r.occupancy_rate * 100)}% occupancy` : 'occupancy n/a'}
+                          </p>
+                        : <p className="text-xs text-red-400/80 mt-0.5 break-all">{r.error}</p>}
                     </div>
-                    <span className={`text-xs font-medium shrink-0 ml-3 ${r.success ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {r.success ? '✓ Updated' : '✗ Failed'}
-                    </span>
+                    <span className={`text-xs font-medium shrink-0 ml-3 ${r.success ? 'text-emerald-400' : 'text-red-400'}`}>{r.success ? '✓ Updated' : '✗ Failed'}</span>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {/* ── Apify section ── */}
+          {/* AirROI Comparable Listings */}
+          {airroiComparableResults.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">AirROI Comparable Listings</p>
+              <div className="space-y-1.5">
+                {airroiComparableResults.map((r) => (
+                  <div key={r.propertyName} className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${r.success ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'}`}>
+                    <div>
+                      <p className={`text-sm font-medium ${r.success ? 'text-emerald-300' : 'text-red-300'}`}>{r.propertyName}</p>
+                      {r.success
+                        ? <p className="text-xs text-slate-400 mt-0.5">{r.count} comparable listings pulled</p>
+                        : <p className="text-xs text-red-400/80 mt-0.5 break-all">{r.error}</p>}
+                    </div>
+                    <span className={`text-xs font-medium shrink-0 ml-3 ${r.success ? 'text-emerald-400' : 'text-red-400'}`}>{r.success ? `${r.count} listings` : '✗ Failed'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Apify Competitor Listings */}
           {(pollResults.length > 0 || apifyErrors.length > 0) && (
             <div>
               <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Apify Competitor Listings</p>
               <div className="space-y-1.5">
                 {pollResults.map((r) => (
-                  <div
-                    key={r.runId}
-                    className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${
-                      r.status === 'SUCCEEDED' ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'
-                    }`}
-                  >
+                  <div key={r.runId} className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${r.status === 'SUCCEEDED' ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'}`}>
                     <div>
                       <p className={`text-sm font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-300' : 'text-red-300'}`}>
                         {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
                       </p>
                       {r.error && <p className="text-xs text-red-400/80 mt-0.5">{r.error}</p>}
+                      {r.status === 'SUCCEEDED' && r.airroiMerged != null && r.airroiMerged > 0 && (
+                        <p className="text-xs text-blue-400/70 mt-0.5">+ {r.airroiMerged} AirROI listings merged</p>
+                      )}
                     </div>
                     <span className={`text-xs font-medium shrink-0 ml-3 ${r.status === 'SUCCEEDED' ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {r.status === 'SUCCEEDED' ? `${r.listings ?? 0} listings` : '✗ Failed'}
+                      {r.status === 'SUCCEEDED' ? `${r.listings ?? 0} total` : '✗ Failed'}
                     </span>
                   </div>
                 ))}
@@ -421,19 +493,18 @@ function MarketDataSection() {
             </div>
           )}
 
-          {/* Apify note when no runs started */}
-          {apifyErrors.length === 0 && pollResults.length === 0 && runs.length === 0 && phase === 'done' && (
+          {/* Apify skipped note */}
+          {sources.apify && apifyErrors.length === 0 && pollResults.length === 0 && runs.length === 0 && phase === 'done' && (
             <div>
               <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Apify Competitor Listings</p>
               <div className="rounded-lg px-3 py-2.5 border bg-slate-800/50 border-slate-600/40">
-                <p className="text-sm text-slate-400">No Apify runs were started — AirROI market data was still saved above.</p>
+                <p className="text-sm text-slate-400">No Apify runs started — AirROI data above was saved.</p>
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Fatal error (network failure, auth error, etc.) */}
       {fatalError && (
         <div className="bg-amber-900/20 border border-amber-500/40 rounded-lg px-4 py-3 mb-4">
           <p className="text-amber-300 text-sm whitespace-pre-wrap">{fatalError}</p>
@@ -444,7 +515,7 @@ function MarketDataSection() {
         <svg className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-        After refreshing, open any calendar date to see competitor prices in the date panel.
+        After syncing, open any calendar date to see competitor prices in the date panel.
       </div>
     </div>
   )
