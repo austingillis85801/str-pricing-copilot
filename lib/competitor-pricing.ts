@@ -90,19 +90,51 @@ async function fetchApifyCompetitors(
 
   const items = await runRes.json() as Record<string, unknown>[]
 
+  // Log first item to help debug field names (visible in Vercel function logs)
+  if (items.length > 0) {
+    console.log('Apify sample item keys:', Object.keys(items[0]))
+    console.log('Apify sample item:', JSON.stringify(items[0]).slice(0, 500))
+  } else {
+    console.warn('Apify returned 0 items')
+  }
+
+  // Parse price from various formats Apify may return
+  function extractPrice(item: Record<string, unknown>): number {
+    // Try direct numeric price fields
+    for (const key of ['price', 'pricing.rate.amount', 'rate', 'basePrice', 'pricePerNight']) {
+      const val = item[key]
+      if (typeof val === 'number' && val > 0) return val
+    }
+    // Try nested pricing object
+    const pricing = item.pricing as Record<string, unknown> | undefined
+    if (pricing) {
+      const rate = pricing.rate as Record<string, unknown> | undefined
+      if (rate?.amount && typeof rate.amount === 'number') return rate.amount
+      if (pricing.price && typeof pricing.price === 'number') return pricing.price
+    }
+    // Try string price like "$185" or "185"
+    const priceStr = String(item.price ?? item.rate ?? '')
+    const parsed = parseFloat(priceStr.replace(/[^0-9.]/g, ''))
+    if (!isNaN(parsed) && parsed > 0) return parsed
+    return 0
+  }
+
   // Normalize Apify response to our type
   return items
-    .filter((item) => typeof item.price === 'number' && item.price > 0)
-    .map((item) => ({
-      listing_id: String(item.id ?? item.listingId ?? ''),
-      name: String(item.name ?? item.title ?? ''),
-      price_per_night: Number(item.price),
-      rating: item.rating != null ? Number(item.rating) : null,
-      bedrooms: item.bedrooms != null ? Number(item.bedrooms) : null,
-      distance_miles: null, // Apify doesn't return distance — we store null
-      platform: 'airbnb' as const,
-      url: item.url ? String(item.url) : null,
-    }))
+    .map((item) => {
+      const price = extractPrice(item)
+      return {
+        listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
+        name: String(item.name ?? item.title ?? ''),
+        price_per_night: price,
+        rating: item.rating != null ? Number(item.rating) : (item.stars != null ? Number(item.stars) : null),
+        bedrooms: item.bedrooms != null ? Number(item.bedrooms) : null,
+        distance_miles: null,
+        platform: 'airbnb' as const,
+        url: item.url ? String(item.url) : null,
+      }
+    })
+    .filter((item) => item.price_per_night > 0)
     .slice(0, maxListings)
 }
 
