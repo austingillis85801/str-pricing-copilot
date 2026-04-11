@@ -66,7 +66,13 @@ export async function GET(request: Request) {
           const { status, datasetId } = await checkApifyRun(run.runId)
 
           if (status === 'SUCCEEDED' && datasetId) {
-            const listings = await fetchApifyResults(datasetId)
+            const coords = PROPERTY_COORDS[run.slug]
+            const listings = await fetchApifyResults(datasetId, 20, coords ? {
+              propertyLat: coords.lat,
+              propertyLng: coords.lng,
+              propertyBedrooms: coords.bedrooms,
+              maxMiles: coords.maxMiles,
+            } : {})
             const market = buildMarketSnapshot(listings)
             if (listings.length > 0) {
               await writeCache(run.prop.id, run.slug, listings, market)

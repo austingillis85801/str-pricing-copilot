@@ -148,22 +148,41 @@ interface PollResult {
   error?: string
 }
 
+interface AirROIResult {
+  propertyName: string
+  slug: string
+  success: boolean
+  adr: number | null
+  occupancy_rate: number | null
+  error?: string
+}
+
 function MarketDataSection() {
   const [phase, setPhase] = useState<'idle' | 'starting' | 'polling' | 'done' | 'error'>('idle')
   const [runs, setRuns] = useState<RunEntry[]>([])
   const [pollResults, setPollResults] = useState<PollResult[]>([])
-  const [error, setError] = useState<string | null>(null)
+  const [apifyErrors, setApifyErrors] = useState<{ propertyName: string; error: string }[]>([])
+  const [airroiResults, setAirroiResults] = useState<AirROIResult[]>([])
+  const [fatalError, setFatalError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
 
-  async function handleRefresh() {
+  // slugs = null means "refresh all"; ['moab'] or ['bear-lake'] = single property
+  async function handleRefresh(slugs: string[] | null = null) {
     setPhase('starting')
-    setError(null)
+    setFatalError(null)
     setPollResults([])
+    setApifyErrors([])
+    setAirroiResults([])
     setElapsed(0)
 
     try {
-      // Step 1: Start Apify runs (returns instantly)
-      const startRes = await fetch('/api/competitor-pricing/start', { method: 'POST' })
+      // Step 1 — start Apify runs AND call AirROI in parallel (both independent)
+      const body = slugs ? JSON.stringify({ slugs }) : undefined
+      const startRes = await fetch('/api/competitor-pricing/start', {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body,
+      })
       if (!startRes.ok) {
         const errData = await startRes.json().catch(() => ({ error: 'Start request failed' })) as { error?: string }
         throw new Error(errData.error ?? `HTTP ${startRes.status}`)
@@ -171,30 +190,41 @@ function MarketDataSection() {
       const startData = await startRes.json() as {
         success: boolean
         runs: RunEntry[]
-        errors?: { propertyName: string; error: string }[]
+        apifyErrors?: { propertyName: string; error: string }[]
+        airroiResults?: AirROIResult[]
         error?: string
       }
-      if (!startData.success) throw new Error(startData.error ?? 'Failed to start runs')
-      if (startData.runs.length === 0) throw new Error('No runs started')
+      if (!startData.success) throw new Error(startData.error ?? 'Unknown error from start route')
+
+      // Capture AirROI results immediately — they're done now regardless of Apify
+      setAirroiResults(startData.airroiResults ?? [])
+      setApifyErrors(startData.apifyErrors ?? [])
+
+      if ((startData.runs ?? []).length === 0) {
+        // No Apify runs started — AirROI may still have succeeded
+        // Show results and stop here (no polling needed)
+        setPhase('done')
+        return
+      }
 
       setRuns(startData.runs)
       setPhase('polling')
 
-      // Step 2: Poll every 10 seconds from the browser
+      // Step 2 — poll Apify every 10s from the browser
       const runsParam = startData.runs
         .map((r) => `${r.runId}:${r.propertyId}:${r.slug}`)
         .join(',')
 
       const startTime = Date.now()
-      const maxPollTime = 5 * 60 * 1000 // 5 minutes max
+      const maxPollTime = 5 * 60 * 1000
 
       const poll = async (): Promise<void> => {
         const elapsedMs = Date.now() - startTime
         setElapsed(Math.round(elapsedMs / 1000))
 
         if (elapsedMs > maxPollTime) {
-          setPhase('error')
-          setError('Timed out after 5 minutes — Apify runs may still be completing. Try again in a few minutes.')
+          setPhase('done') // still show AirROI results
+          setFatalError('Apify timed out after 5 minutes — competitor listings may still be processing. AirROI market data above was saved.')
           return
         }
 
@@ -210,23 +240,37 @@ function MarketDataSection() {
             return
           }
 
-          // Still running — poll again in 10s
           await new Promise((resolve) => setTimeout(resolve, 10_000))
           return poll()
         } catch (err) {
-          setPhase('error')
-          setError(err instanceof Error ? err.message : 'Polling failed')
+          setPhase('done') // still show AirROI results
+          setFatalError(err instanceof Error ? err.message : 'Polling failed')
         }
       }
 
       await poll()
     } catch (err) {
       setPhase('error')
-      setError(err instanceof Error ? err.message : 'Unknown error')
+      setFatalError(err instanceof Error ? err.message : 'Unknown error')
     }
   }
 
   const isActive = phase === 'starting' || phase === 'polling'
+
+  const RefreshIcon = () => (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+    </svg>
+  )
+
+  const SpinIcon = () => (
+    <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  )
+
+  const hasAnyResults = airroiResults.length > 0 || pollResults.length > 0 || apifyErrors.length > 0
 
   return (
     <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
@@ -234,47 +278,50 @@ function MarketDataSection() {
         <div>
           <h2 className="text-lg font-semibold text-white">Competitor Market Data</h2>
           <p className="text-slate-400 text-sm mt-0.5">
-            Fetches ~20 live Airbnb listings near each property and caches them for 4 days.
-            Auto-refreshes via cron — or trigger a manual refresh here.
+            Apify scrapes live Airbnb listings. AirROI provides market ADR &amp; occupancy.
+            Both run independently — if one fails the other still updates.
           </p>
         </div>
         <button
-          onClick={handleRefresh}
+          type="button"
+          onClick={() => handleRefresh(null)}
           disabled={isActive}
           className="shrink-0 flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-700/50 text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
         >
           {isActive ? (
-            <>
-              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              {phase === 'starting' ? 'Starting…' : `Polling… ${elapsed}s`}
-            </>
+            <><SpinIcon />{phase === 'starting' ? 'Starting…' : `Polling… ${elapsed}s`}</>
           ) : (
-            <>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Refresh Now
-            </>
+            <><RefreshIcon />Refresh Both</>
           )}
         </button>
       </div>
 
-      {/* Active polling status */}
-      {isActive && (
+      {/* Per-property buttons */}
+      {!isActive && (
+        <div className="flex gap-2 mb-5">
+          {[{ slug: 'moab', label: 'Moab only' }, { slug: 'bear-lake', label: 'Bear Lake only' }].map(({ slug, label }) => (
+            <button
+              key={slug}
+              type="button"
+              onClick={() => handleRefresh([slug])}
+              disabled={isActive}
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-slate-500 text-slate-300 hover:text-white rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+            >
+              <RefreshIcon />{label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Apify polling progress */}
+      {phase === 'polling' && (
         <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg px-4 py-3 mb-4">
           <p className="text-blue-300 text-sm font-medium">
-            {phase === 'starting'
-              ? 'Starting Apify scraper runs…'
-              : `Waiting for Apify to finish scraping… (${elapsed}s)`}
+            Apify scraping… ({elapsed}s)
           </p>
           <p className="text-blue-400/70 text-xs mt-0.5">
-            Apify is scraping live Airbnb listings for {runs.length} propert{runs.length === 1 ? 'y' : 'ies'}.
-            This typically takes 1–3 minutes. Keep this tab open.
+            Scraping {runs.length} propert{runs.length === 1 ? 'y' : 'ies'} — typically 1–3 minutes. Keep this tab open.
           </p>
-          {/* Per-run status during polling */}
           {pollResults.length > 0 && (
             <div className="mt-3 space-y-1.5">
               {pollResults.map((r) => (
@@ -289,7 +336,8 @@ function MarketDataSection() {
                   <span className="text-xs text-slate-300">
                     {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
                     {' — '}
-                    {r.status === 'SUCCEEDED' ? `Done (${r.listings} listings)` : r.status === 'RUNNING' || r.status === 'READY' ? 'Running…' : r.status}
+                    {r.status === 'SUCCEEDED' ? `Done (${r.listings} listings)`
+                      : r.status === 'RUNNING' || r.status === 'READY' ? 'Running…' : r.status}
                   </span>
                 </div>
               ))}
@@ -298,36 +346,97 @@ function MarketDataSection() {
         </div>
       )}
 
-      {/* Final results */}
-      {phase === 'done' && pollResults.length > 0 && (
-        <div className="space-y-2 mb-4">
-          {pollResults.map((r) => (
-            <div
-              key={r.runId}
-              className={`flex items-center justify-between rounded-lg px-4 py-3 border ${
-                r.status === 'SUCCEEDED'
-                  ? 'bg-emerald-900/20 border-emerald-600/40'
-                  : 'bg-red-900/20 border-red-500/40'
-              }`}
-            >
-              <div>
-                <p className={`text-sm font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
-                </p>
-                {r.error && <p className="text-xs text-red-400/80 mt-0.5">{r.error}</p>}
+      {/* Results — shown after start completes (AirROI is instant; Apify takes longer) */}
+      {(phase === 'done' || phase === 'error' || phase === 'starting') && hasAnyResults && (
+        <div className="space-y-3 mb-4">
+
+          {/* ── AirROI section ── */}
+          {airroiResults.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">AirROI Market Data</p>
+              <div className="space-y-1.5">
+                {airroiResults.map((r) => (
+                  <div
+                    key={r.propertyName}
+                    className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${
+                      r.success ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'
+                    }`}
+                  >
+                    <div>
+                      <p className={`text-sm font-medium ${r.success ? 'text-emerald-300' : 'text-red-300'}`}>
+                        {r.propertyName}
+                      </p>
+                      {r.success ? (
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {r.adr != null ? `ADR $${Math.round(r.adr)}` : 'ADR n/a'}
+                          {' · '}
+                          {r.occupancy_rate != null ? `${Math.round(r.occupancy_rate * 100)}% occupancy` : 'occupancy n/a'}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-red-400/80 mt-0.5 break-all">{r.error}</p>
+                      )}
+                    </div>
+                    <span className={`text-xs font-medium shrink-0 ml-3 ${r.success ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {r.success ? '✓ Updated' : '✗ Failed'}
+                    </span>
+                  </div>
+                ))}
               </div>
-              <span className={`text-xs font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-400' : 'text-red-400'}`}>
-                {r.status === 'SUCCEEDED' ? `${r.listings ?? 0} listings` : 'Failed'}
-              </span>
             </div>
-          ))}
+          )}
+
+          {/* ── Apify section ── */}
+          {(pollResults.length > 0 || apifyErrors.length > 0) && (
+            <div>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Apify Competitor Listings</p>
+              <div className="space-y-1.5">
+                {pollResults.map((r) => (
+                  <div
+                    key={r.runId}
+                    className={`flex items-start justify-between rounded-lg px-3 py-2.5 border ${
+                      r.status === 'SUCCEEDED' ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-red-900/20 border-red-500/40'
+                    }`}
+                  >
+                    <div>
+                      <p className={`text-sm font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-300' : 'text-red-300'}`}>
+                        {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
+                      </p>
+                      {r.error && <p className="text-xs text-red-400/80 mt-0.5">{r.error}</p>}
+                    </div>
+                    <span className={`text-xs font-medium shrink-0 ml-3 ${r.status === 'SUCCEEDED' ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {r.status === 'SUCCEEDED' ? `${r.listings ?? 0} listings` : '✗ Failed'}
+                    </span>
+                  </div>
+                ))}
+                {apifyErrors.map((e) => (
+                  <div key={e.propertyName} className="flex items-start justify-between rounded-lg px-3 py-2.5 border bg-red-900/20 border-red-500/40">
+                    <div>
+                      <p className="text-sm font-medium text-red-300">{e.propertyName}</p>
+                      <p className="text-xs text-red-400/80 mt-0.5 break-all">{e.error}</p>
+                    </div>
+                    <span className="text-xs font-medium text-red-400 shrink-0 ml-3">✗ Failed</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Apify note when no runs started */}
+          {apifyErrors.length === 0 && pollResults.length === 0 && runs.length === 0 && phase === 'done' && (
+            <div>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Apify Competitor Listings</p>
+              <div className="rounded-lg px-3 py-2.5 border bg-slate-800/50 border-slate-600/40">
+                <p className="text-sm text-slate-400">No Apify runs were started — AirROI market data was still saved above.</p>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Error */}
-      {phase === 'error' && error && (
-        <div className="bg-red-900/20 border border-red-500/40 rounded-lg px-4 py-3 mb-4">
-          <p className="text-red-300 text-sm">{error}</p>
+      {/* Fatal error (network failure, auth error, etc.) */}
+      {fatalError && (
+        <div className="bg-amber-900/20 border border-amber-500/40 rounded-lg px-4 py-3 mb-4">
+          <p className="text-amber-300 text-sm whitespace-pre-wrap">{fatalError}</p>
         </div>
       )}
 

@@ -2,18 +2,33 @@ import { createServerSupabaseClient } from './supabase-server'
 
 // ─── Coordinates ──────────────────────────────────────────────────────────────
 
-export const PROPERTY_COORDS: Record<string, { lat: number; lng: number; label: string; airbnbSearchUrl: string }> = {
+export const PROPERTY_COORDS: Record<string, {
+  lat: number
+  lng: number
+  label: string
+  bedrooms: number
+  maxMiles: number
+  airbnbSearchUrl: string
+}> = {
   moab: {
-    lat: 38.5733,
-    lng: -109.5498,
+    // 3853 S Red Valley Cir, Moab UT — Rim Village Vistas subdivision
+    lat: 38.5153,
+    lng: -109.4892,
     label: 'Moab, UT',
-    airbnbSearchUrl: 'https://www.airbnb.com/s/Moab--UT--United-States/homes?adults=2&place_id=ChIJV2lfFqGZUIcR6e7cqvpJSFw&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
+    bedrooms: 2,
+    maxMiles: 5,
+    // ±1 bedroom: min 1, max 3
+    airbnbSearchUrl: 'https://www.airbnb.com/s/Moab--UT--United-States/homes?adults=2&place_id=ChIJV2lfFqGZUIcR6e7cqvpJSFw&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt&min_bedrooms=1&max_bedrooms=3',
   },
   'bear-lake': {
-    lat: 41.9377,
-    lng: -111.343,
+    // 235 Seasons Ln, Garden City UT
+    lat: 41.9481,
+    lng: -111.3986,
     label: 'Bear Lake, UT',
-    airbnbSearchUrl: 'https://www.airbnb.com/s/Garden-City--UT--United-States/homes?adults=2&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
+    bedrooms: 4,
+    maxMiles: 5,
+    // ±1 bedroom: min 3, max 5
+    airbnbSearchUrl: 'https://www.airbnb.com/s/Garden-City--UT--United-States/homes?adults=2&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt&min_bedrooms=3&max_bedrooms=5',
   },
 }
 
@@ -81,7 +96,7 @@ function addWeeklyDates(baseUrl: string): string {
 /** Start an Apify actor run. Returns the run ID instantly. */
 export async function startApifyRun(
   airbnbSearchUrl: string,
-  maxListings = 20
+  maxListings = 40
 ): Promise<string> {
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
@@ -144,16 +159,45 @@ export async function checkApifyRun(runId: string): Promise<{
   }
 }
 
+/** Haversine distance between two lat/lng points, in miles. */
+function haversineDistanceMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 3958.8 // Earth radius in miles
+  const dLat = ((lat2 - lat1) * Math.PI) / 180
+  const dLng = ((lng2 - lng1) * Math.PI) / 180
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2)
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+export interface FetchApifyOpts {
+  /** Lat of the owner's property — used to calculate distance and filter by radius. */
+  propertyLat?: number
+  /** Lng of the owner's property. */
+  propertyLng?: number
+  /** Bedroom count of the owner's property — competitors filtered to ±1 bedroom. */
+  propertyBedrooms?: number
+  /** Maximum distance from the property in miles (default: 5). */
+  maxMiles?: number
+}
+
 /** Fetch results from a completed Apify run's dataset. */
 export async function fetchApifyResults(
   datasetId: string,
-  maxListings = 20
+  maxListings = 20,
+  opts: FetchApifyOpts = {}
 ): Promise<CompetitorListing[]> {
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
 
+  // Fetch more raw items than we need so we still have good coverage after filtering
+  const fetchLimit = Math.max(maxListings * 3, 60)
+
   const res = await fetch(
-    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}&limit=${maxListings}`,
+    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}&limit=${fetchLimit}`,
     { signal: AbortSignal.timeout(15_000) }
   )
 
@@ -165,7 +209,6 @@ export async function fetchApifyResults(
 
   if (items.length > 0) {
     console.log('Apify sample item keys:', Object.keys(items[0]))
-    // Log price structure to help debug
     const first = items[0]
     const priceObj = first.price as Record<string, unknown> | undefined
     console.log('Apify price sample:', JSON.stringify(priceObj).slice(0, 300))
@@ -174,30 +217,77 @@ export async function fetchApifyResults(
     console.warn('Apify returned 0 items')
   }
 
+  const {
+    propertyLat,
+    propertyLng,
+    propertyBedrooms,
+    maxMiles = 5,
+  } = opts
+
+  const hasCoords = propertyLat != null && propertyLng != null
+
   return items
     .filter((item) => {
-      // Only keep entire-home listings (houses, condos, cabins, townhouses).
-      // Exclude campsites, tents, yurts, hotel rooms, shared spaces, etc.
+      // ── Property type filter ─────────────────────────────────────────────────
+      // Only entire-home listings (houses, condos, cabins, townhouses).
       const pt = typeof item.propertyType === 'string' ? item.propertyType : ''
       const rt = typeof item.roomType === 'string' ? item.roomType : ''
-      // Must be an "Entire X" property type OR roomType "Entire home/apt"
       const isEntireProperty = pt.startsWith('Entire') || rt === 'Entire home/apt'
-      // Double-check: exclude known non-house property types even if they slipped through
       const isExcluded = /camp|tent|yurt|dome|rv|camper|hostel|hotel|resort|shared|farm stay/i.test(pt)
-      return isEntireProperty && !isExcluded
+      if (!isEntireProperty || isExcluded) return false
+
+      // ── Distance filter ──────────────────────────────────────────────────────
+      if (hasCoords) {
+        const coords = item.coordinates as { latitude?: number; longitude?: number } | undefined
+        if (coords?.latitude != null && coords?.longitude != null) {
+          const dist = haversineDistanceMiles(propertyLat!, propertyLng!, coords.latitude, coords.longitude)
+          if (dist > maxMiles) {
+            console.log(`Filtered out "${item.title}" — ${dist.toFixed(1)} mi away (limit ${maxMiles} mi)`)
+            return false
+          }
+        }
+      }
+
+      // ── Bedroom filter ───────────────────────────────────────────────────────
+      // Only filter when we can extract the bedroom count AND a target is given.
+      if (propertyBedrooms != null) {
+        const listingBedrooms = extractBedrooms(item)
+        if (listingBedrooms != null) {
+          const minBr = Math.max(0, propertyBedrooms - 1)
+          const maxBr = propertyBedrooms + 1
+          if (listingBedrooms < minBr || listingBedrooms > maxBr) {
+            console.log(`Filtered out "${item.title}" — ${listingBedrooms} br (target ${propertyBedrooms} ±1)`)
+            return false
+          }
+        }
+      }
+
+      return true
     })
-    .map((item) => ({
-      listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
-      name: String(item.title ?? item.name ?? ''),
-      price_per_night: extractPrice(item),
-      rating: extractRating(item),
-      bedrooms: extractBedrooms(item),
-      property_type: typeof item.propertyType === 'string' ? item.propertyType : null,
-      distance_miles: null,
-      platform: 'airbnb' as const,
-      url: item.url ? String(item.url) : null,
-    }))
+    .map((item) => {
+      // Calculate distance for display
+      let distanceMiles: number | null = null
+      if (hasCoords) {
+        const coords = item.coordinates as { latitude?: number; longitude?: number } | undefined
+        if (coords?.latitude != null && coords?.longitude != null) {
+          distanceMiles = Math.round(haversineDistanceMiles(propertyLat!, propertyLng!, coords.latitude, coords.longitude) * 10) / 10
+        }
+      }
+
+      return {
+        listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
+        name: String(item.title ?? item.name ?? ''),
+        price_per_night: extractPrice(item),
+        rating: extractRating(item),
+        bedrooms: extractBedrooms(item),
+        property_type: typeof item.propertyType === 'string' ? item.propertyType : null,
+        distance_miles: distanceMiles,
+        platform: 'airbnb' as const,
+        url: item.url ? String(item.url) : null,
+      }
+    })
     .filter((item) => item.price_per_night > 0)
+    .sort((a, b) => (a.distance_miles ?? 99) - (b.distance_miles ?? 99)) // nearest first
     .slice(0, maxListings)
 }
 
@@ -299,6 +389,10 @@ function extractBedrooms(item: Record<string, unknown>): number | null {
 }
 
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
+//
+// Uses the /v1/market/data endpoint (confirmed working — shows in AirROI usage dashboard).
+// Auth: ?api_key= query param + X-Api-Key header.
+// AirROI usage dashboard confirms this endpoint is being hit and billing correctly.
 
 export async function fetchAirROIMarket(
   lat: number,
@@ -311,8 +405,6 @@ export async function fetchAirROIMarket(
   }
 
   try {
-    // AirROI does not use Bearer auth — send key as query param.
-    // Also include X-Api-Key header as a secondary attempt in case they switch formats.
     const res = await fetch(
       `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
       {
@@ -323,20 +415,21 @@ export async function fetchAirROIMarket(
         signal: AbortSignal.timeout(15_000),
       }
     )
+
     if (!res.ok) {
       console.warn(`AirROI API error ${res.status}: ${await res.text().catch(() => '')}`)
       return { adr: null, occupancy_rate: null }
     }
 
     const data = await res.json() as Record<string, unknown>
-    // Log raw response so we can confirm field names
     console.log('AirROI raw response:', JSON.stringify(data).slice(0, 500))
 
-    // Try multiple possible field names for ADR and occupancy
+    // Try multiple possible field names — log confirms which are used
     const adr =
       data.avg_daily_rate != null ? Number(data.avg_daily_rate) :
       data.adr != null ? Number(data.adr) :
       data.averageDailyRate != null ? Number(data.averageDailyRate) :
+      data.average_daily_rate != null ? Number(data.average_daily_rate) :
       null
 
     const occupancy_rate =
@@ -345,6 +438,7 @@ export async function fetchAirROIMarket(
       data.occupancy != null ? Number(data.occupancy) :
       null
 
+    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}`)
     return { adr, occupancy_rate }
   } catch (err) {
     console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
@@ -403,8 +497,7 @@ export async function readCache(propertyId: string): Promise<CompetitorData | nu
     const age = Date.now() - new Date(data.fetched_at as string).getTime()
     if (age > CACHE_TTL_MS) return null // stale
 
-    const competitors = data.competitors as CompetitorListing[]
-    if (!competitors || competitors.length === 0) return null
+    const competitors = (data.competitors as CompetitorListing[]) ?? []
 
     return {
       property_id: propertyId,

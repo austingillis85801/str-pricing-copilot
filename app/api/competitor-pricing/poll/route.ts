@@ -50,9 +50,14 @@ export async function GET(request: Request) {
 
       if (status === 'SUCCEEDED' && datasetId) {
         // Run finished — fetch results and cache them
-        const listings = await fetchApifyResults(datasetId)
-        // Also fetch AirROI market data (non-fatal — enriches occupancy/ADR)
         const coords = PROPERTY_COORDS[slug]
+        const listings = await fetchApifyResults(datasetId, 20, coords ? {
+          propertyLat: coords.lat,
+          propertyLng: coords.lng,
+          propertyBedrooms: coords.bedrooms,
+          maxMiles: coords.maxMiles,
+        } : {})
+        // Also fetch AirROI market data (non-fatal — enriches occupancy/ADR)
         const airroi = coords
           ? await fetchAirROIMarket(coords.lat, coords.lng)
           : { adr: null, occupancy_rate: null }
