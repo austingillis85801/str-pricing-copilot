@@ -390,9 +390,12 @@ function extractBedrooms(item: Record<string, unknown>): number | null {
 
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
 //
-// Uses the /v1/market/data endpoint (confirmed working — shows in AirROI usage dashboard).
-// Auth: ?api_key= query param + X-Api-Key header.
-// AirROI usage dashboard confirms this endpoint is being hit and billing correctly.
+// Two-step flow (confirmed from AirROI API docs):
+//   1. GET /markets/lookup?lat=&lng= → returns market object with id
+//   2. POST /markets/summary          → returns ADR, occupancy, etc.
+// Auth: X-API-KEY header only (no query param).
+
+const AIRROI_BASE = 'https://api.airroi.com'
 
 export async function fetchAirROIMarket(
   lat: number,
@@ -404,38 +407,72 @@ export async function fetchAirROIMarket(
     return { adr: null, occupancy_rate: null }
   }
 
+  const headers = {
+    'X-API-KEY': apiKey,
+    'Content-Type': 'application/json',
+  }
+
   try {
-    const res = await fetch(
-      `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    // ── Step 1: Look up the market at these coordinates ──────────────────────
+    const lookupRes = await fetch(
+      `${AIRROI_BASE}/markets/lookup?lat=${lat}&lng=${lng}`,
+      { headers, signal: AbortSignal.timeout(15_000) }
+    )
+
+    if (!lookupRes.ok) {
+      const body = await lookupRes.text().catch(() => '')
+      console.warn(`AirROI /markets/lookup error ${lookupRes.status}: ${body}`)
+      return { adr: null, occupancy_rate: null }
+    }
+
+    const lookupData = await lookupRes.json() as Record<string, unknown>
+    console.log('AirROI lookup raw:', JSON.stringify(lookupData).slice(0, 400))
+
+    // Market ID may be nested under .data or at top level
+    const marketObj = (lookupData.data ?? lookupData) as Record<string, unknown>
+    const marketId = marketObj.id ?? marketObj.marketId ?? marketObj.market_id
+
+    if (!marketId) {
+      console.warn('AirROI: no market ID in lookup response', JSON.stringify(lookupData).slice(0, 200))
+      return { adr: null, occupancy_rate: null }
+    }
+
+    console.log(`AirROI market ID: ${marketId}`)
+
+    // ── Step 2: Get market summary (ADR + occupancy) ─────────────────────────
+    const summaryRes = await fetch(
+      `${AIRROI_BASE}/markets/summary`,
       {
-        headers: {
-          'X-Api-Key': apiKey,
-          'Content-Type': 'application/json',
-        },
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ marketId }),
         signal: AbortSignal.timeout(15_000),
       }
     )
 
-    if (!res.ok) {
-      console.warn(`AirROI API error ${res.status}: ${await res.text().catch(() => '')}`)
+    if (!summaryRes.ok) {
+      const body = await summaryRes.text().catch(() => '')
+      console.warn(`AirROI /markets/summary error ${summaryRes.status}: ${body}`)
       return { adr: null, occupancy_rate: null }
     }
 
-    const data = await res.json() as Record<string, unknown>
-    console.log('AirROI raw response:', JSON.stringify(data).slice(0, 500))
+    const summaryData = await summaryRes.json() as Record<string, unknown>
+    console.log('AirROI summary raw:', JSON.stringify(summaryData).slice(0, 500))
 
-    // Try multiple possible field names — log confirms which are used
+    // Unwrap .data wrapper if present
+    const s = (summaryData.data ?? summaryData) as Record<string, unknown>
+
     const adr =
-      data.avg_daily_rate != null ? Number(data.avg_daily_rate) :
-      data.adr != null ? Number(data.adr) :
-      data.averageDailyRate != null ? Number(data.averageDailyRate) :
-      data.average_daily_rate != null ? Number(data.average_daily_rate) :
+      s.averageDailyRate != null ? Number(s.averageDailyRate) :
+      s.average_daily_rate != null ? Number(s.average_daily_rate) :
+      s.adr != null ? Number(s.adr) :
+      s.avg_daily_rate != null ? Number(s.avg_daily_rate) :
       null
 
     const occupancy_rate =
-      data.occupancy_rate != null ? Number(data.occupancy_rate) :
-      data.occupancyRate != null ? Number(data.occupancyRate) :
-      data.occupancy != null ? Number(data.occupancy) :
+      s.occupancyRate != null ? Number(s.occupancyRate) :
+      s.occupancy_rate != null ? Number(s.occupancy_rate) :
+      s.occupancy != null ? Number(s.occupancy) :
       null
 
     console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}`)

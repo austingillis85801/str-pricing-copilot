@@ -5,7 +5,9 @@ import { authOptions } from '@/lib/auth'
 /**
  * GET /api/debug/airroi?lat=38.5153&lng=-109.4892
  *
- * Probes multiple AirROI base URLs + paths to find what actually works.
+ * Tests the correct AirROI two-step flow:
+ *   1. GET /markets/lookup  → get market ID
+ *   2. POST /markets/summary → get ADR + occupancy
  * Session-guarded — only accessible when logged in.
  */
 export async function GET(request: Request) {
@@ -19,89 +21,56 @@ export async function GET(request: Request) {
   const lat = searchParams.get('lat') ?? '38.5153'
   const lng = searchParams.get('lng') ?? '-109.4892'
 
-  const headers = { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
+  const BASE = 'https://api.airroi.com'
+  const headers = { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }
 
-  // Try different base URLs × common paths
-  const baseUrls = [
-    'https://api.airroi.com',
-    'https://airroi.com',
-    'https://app.airroi.com',
-    'https://data.airroi.com',
-    'https://api.airroi.io',
-    'https://airroi.io',
-  ]
+  // Step 1: markets/lookup
+  let lookupRaw: unknown = null
+  let marketId: string | null = null
 
-  const paths = [
-    `/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
-    `/v1/markets/lookup?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
-    `/api/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
-    `/api/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
-    `/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
-  ]
+  try {
+    const r = await fetch(`${BASE}/markets/lookup?lat=${lat}&lng=${lng}`, {
+      headers,
+      signal: AbortSignal.timeout(12_000),
+    })
+    const text = await r.text()
+    try { lookupRaw = JSON.parse(text) } catch { lookupRaw = text }
 
-  const results: Array<{
-    url: string
-    status: number
-    ok: boolean
-    top_level_keys: string[]
-    snippet: string
-  }> = []
-
-  for (const base of baseUrls) {
-    for (const path of paths.slice(0, 2)) { // only first 2 paths per base to stay fast
-      const url = base + path
-      try {
-        const res = await fetch(url, {
-          headers,
-          signal: AbortSignal.timeout(8_000),
-        })
-        const text = await res.text()
-        let parsed: Record<string, unknown> = {}
-        try { parsed = JSON.parse(text) } catch { /* not json */ }
-
-        results.push({
-          url: url.replace(apiKey, '***'),
-          status: res.status,
-          ok: res.ok,
-          top_level_keys: Object.keys(parsed),
-          snippet: text.slice(0, 200),
-        })
-
-        // If we found a working one, stop early
-        if (res.ok) break
-      } catch (err) {
-        results.push({
-          url: url.replace(apiKey, '***'),
-          status: 0,
-          ok: false,
-          top_level_keys: [],
-          snippet: `NETWORK ERROR: ${String(err).slice(0, 100)}`,
-        })
-      }
+    if (r.ok && lookupRaw && typeof lookupRaw === 'object') {
+      const obj = lookupRaw as Record<string, unknown>
+      const inner = (obj.data ?? obj) as Record<string, unknown>
+      marketId = String(inner.id ?? inner.marketId ?? inner.market_id ?? '')
+      if (!marketId) marketId = null
     }
+
+    return NextResponse.json({
+      step1_lookup: {
+        status: r.status,
+        ok: r.ok,
+        market_id_found: marketId,
+        raw: lookupRaw,
+      },
+      step2_summary: marketId
+        ? await (async () => {
+            const r2 = await fetch(`${BASE}/markets/summary`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ marketId }),
+              signal: AbortSignal.timeout(12_000),
+            })
+            const t2 = await r2.text()
+            let parsed: unknown = t2
+            try { parsed = JSON.parse(t2) } catch { /* not json */ }
+            return { status: r2.status, ok: r2.ok, raw: parsed }
+          })()
+        : { skipped: true, reason: 'no market ID from step 1' },
+      api_key_prefix: apiKey.slice(0, 6) + '...',
+    })
+  } catch (err) {
+    return NextResponse.json({
+      error: String(err),
+      step1_lookup: { raw: lookupRaw },
+      api_key_prefix: apiKey.slice(0, 6) + '...',
+    }, { status: 500 })
   }
-
-  // Also try hitting the bare root of each base to see if it responds at all
-  const rootResults: Array<{ base: string; status: number; reachable: boolean; snippet: string }> = []
-  for (const base of baseUrls) {
-    try {
-      const res = await fetch(`${base}/`, { headers, signal: AbortSignal.timeout(5_000) })
-      const text = await res.text()
-      rootResults.push({ base, status: res.status, reachable: true, snippet: text.slice(0, 100) })
-    } catch (err) {
-      rootResults.push({ base, status: 0, reachable: false, snippet: String(err).slice(0, 100) })
-    }
-  }
-
-  const working = results.filter(r => r.ok)
-
-  return NextResponse.json({
-    api_key_present: !!apiKey,
-    api_key_length: apiKey.length,
-    api_key_prefix: apiKey.slice(0, 6) + '...',
-    working_endpoints: working,
-    reachable_bases: rootResults.filter(r => r.reachable),
-    all_results: results,
-    root_probes: rootResults,
-  })
 }
