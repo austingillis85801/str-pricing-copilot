@@ -390,16 +390,17 @@ function extractBedrooms(item: Record<string, unknown>): number | null {
 
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
 //
-// Two-step flow (confirmed from AirROI API docs):
-//   1. GET /markets/lookup?lat=&lng= → returns market object with id
-//   2. POST /markets/summary          → returns ADR, occupancy, etc.
-// Auth: X-API-KEY header only (no query param).
+// Two-step flow (per AirROI API docs at airroi.com/api/documentation):
+//   1. GET /markets/search?latitude=&longitude= → returns { country, region, locality, district }
+//   2. POST /markets/summary with { market:{...}, filter:{bedrooms:{range:[min,max]}}, num_months:12 }
+// Auth: X-API-KEY header only.
 
 const AIRROI_BASE = 'https://api.airroi.com'
 
 export async function fetchAirROIMarket(
   lat: number,
-  lng: number
+  lng: number,
+  bedrooms?: number
 ): Promise<{ adr: number | null; occupancy_rate: number | null }> {
   const apiKey = process.env.AIRROI_API_KEY
   if (!apiKey) {
@@ -413,39 +414,54 @@ export async function fetchAirROIMarket(
   }
 
   try {
-    // ── Step 1: Look up the market at these coordinates ──────────────────────
-    const lookupRes = await fetch(
-      `${AIRROI_BASE}/markets/lookup?lat=${lat}&lng=${lng}`,
+    // ── Step 1: Find the market at these coordinates ─────────────────────────
+    const searchRes = await fetch(
+      `${AIRROI_BASE}/markets/search?latitude=${lat}&longitude=${lng}`,
       { headers, signal: AbortSignal.timeout(15_000) }
     )
 
-    if (!lookupRes.ok) {
-      const body = await lookupRes.text().catch(() => '')
-      console.warn(`AirROI /markets/lookup error ${lookupRes.status}: ${body}`)
+    if (!searchRes.ok) {
+      const body = await searchRes.text().catch(() => '')
+      console.warn(`AirROI /markets/search error ${searchRes.status}: ${body}`)
       return { adr: null, occupancy_rate: null }
     }
 
-    const lookupData = await lookupRes.json() as Record<string, unknown>
-    console.log('AirROI lookup raw:', JSON.stringify(lookupData).slice(0, 400))
+    const searchData = await searchRes.json() as Record<string, unknown>
+    console.log('AirROI market search raw:', JSON.stringify(searchData).slice(0, 400))
 
-    // Market ID may be nested under .data or at top level
-    const marketObj = (lookupData.data ?? lookupData) as Record<string, unknown>
-    const marketId = marketObj.id ?? marketObj.marketId ?? marketObj.market_id
+    // Unwrap .data wrapper if present
+    const mkt = (searchData.data ?? searchData) as Record<string, unknown>
+    const { country, region, locality, district } = mkt as {
+      country?: string; region?: string; locality?: string; district?: string | null
+    }
 
-    if (!marketId) {
-      console.warn('AirROI: no market ID in lookup response', JSON.stringify(lookupData).slice(0, 200))
+    if (!country || !region || !locality) {
+      console.warn('AirROI: missing market fields', JSON.stringify(searchData).slice(0, 200))
       return { adr: null, occupancy_rate: null }
     }
 
-    console.log(`AirROI market ID: ${marketId}`)
+    console.log(`AirROI market: ${locality}, ${region}, ${country}`)
 
     // ── Step 2: Get market summary (ADR + occupancy) ─────────────────────────
+    // Include bedroom filter to match our property type (±1 bedroom)
+    const bedroomFilter = bedrooms != null
+      ? { bedrooms: { range: [Math.max(0, bedrooms - 1), bedrooms + 1] } }
+      : {}
+
     const summaryRes = await fetch(
       `${AIRROI_BASE}/markets/summary`,
       {
         method: 'POST',
         headers,
-        body: JSON.stringify({ marketId }),
+        body: JSON.stringify({
+          market: { country, region, locality, district: district ?? null },
+          filter: {
+            ...bedroomFilter,
+            room_type: { eq: 'entire_home' },
+          },
+          num_months: 12,
+          currency: 'usd',
+        }),
         signal: AbortSignal.timeout(15_000),
       }
     )
@@ -457,25 +473,28 @@ export async function fetchAirROIMarket(
     }
 
     const summaryData = await summaryRes.json() as Record<string, unknown>
-    console.log('AirROI summary raw:', JSON.stringify(summaryData).slice(0, 500))
+    console.log('AirROI summary raw:', JSON.stringify(summaryData).slice(0, 600))
 
     // Unwrap .data wrapper if present
     const s = (summaryData.data ?? summaryData) as Record<string, unknown>
 
+    // ADR — try all known field names from AirROI docs
     const adr =
-      s.averageDailyRate != null ? Number(s.averageDailyRate) :
+      s.avg_rate != null ? Number(s.avg_rate) :
       s.average_daily_rate != null ? Number(s.average_daily_rate) :
+      s.averageDailyRate != null ? Number(s.averageDailyRate) :
       s.adr != null ? Number(s.adr) :
       s.avg_daily_rate != null ? Number(s.avg_daily_rate) :
       null
 
+    // Occupancy — try all known field names
     const occupancy_rate =
-      s.occupancyRate != null ? Number(s.occupancyRate) :
       s.occupancy_rate != null ? Number(s.occupancy_rate) :
+      s.occupancyRate != null ? Number(s.occupancyRate) :
       s.occupancy != null ? Number(s.occupancy) :
       null
 
-    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}`)
+    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}, all keys: ${Object.keys(s).join(', ')}`)
     return { adr, occupancy_rate }
   } catch (err) {
     console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
@@ -584,7 +603,7 @@ export async function getMarketSnapshot(
   if (!coords) throw new Error(`Unknown property slug: ${slug}`)
 
   // Fetch AirROI (fast, non-fatal) — Apify is now handled via async start/poll
-  const airroi = await fetchAirROIMarket(coords.lat, coords.lng)
+  const airroi = await fetchAirROIMarket(coords.lat, coords.lng, coords.bedrooms)
 
   // Return empty market snapshot if no cache — caller should use async flow
   return {

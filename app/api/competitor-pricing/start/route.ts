@@ -76,7 +76,7 @@ export async function POST(request: Request) {
       toProcess.map(async ({ prop, slug, coords }) => {
         const [apifyOutcome, airroiOutcome] = await Promise.allSettled([
           startApifyRun(coords.airbnbSearchUrl),
-          fetchAirROIMarket(coords.lat, coords.lng),
+          fetchAirROIMarket(coords.lat, coords.lng, coords.bedrooms),
         ])
 
         // ── Apify result ──────────────────────────────────────────────────────
