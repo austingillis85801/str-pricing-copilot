@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { runRulesEngine } from './rules-engine'
 import { runWeatherEngine } from './weather-engine'
+import { getMarketSnapshot } from './competitor-pricing'
 import { createServerSupabaseClient } from './supabase-server'
 import { buildEmailHtml, type DigestData } from './email-template'
 import type { Property, RulesEngineOutput, UpcomingEvent } from './types'
@@ -13,10 +14,15 @@ The Rules Engine has already calculated all data. You are the Executive Reviewer
 Do not calculate dates yourself. Interpret the pre-calculated data.
 Always recommend manual price changes — never automation.
 
+If market_snapshot data is provided, use it to compare the owner's recommended prices to the local competitor market.
+The owner's goal is maximum price AND maximum occupancy — not just one or the other.
+Flag if the owner is significantly above market on open dates close to check-in (cut risk),
+or significantly below market on dates far out (raise opportunity).
+
 Respond with valid JSON only, no markdown:
 {
   "subject": "STR Pricing Digest — [brief summary of most important thing this week]",
-  "weekly_snapshot": "2–3 sentences on overall status of both properties",
+  "weekly_snapshot": "2–3 sentences on overall status of both properties, mentioning market position if data is available",
   "top_actions": [
     { "property": "Moab or Bear Lake", "date": "specific date", "action": "plain English action", "urgency": "high or medium" }
   ],
@@ -44,11 +50,16 @@ export async function generateWeeklyDigest(): Promise<{ subject: string; html: s
     throw new Error('No properties found')
   }
 
-  // Run rules engines for all properties + weather engine in parallel
+  // Run rules engines for all properties + weather engine + market snapshots in parallel
   const rulesPromises = (properties as Property[]).map((p) => runRulesEngine(p.id))
-  const [rulesOutputs, weatherFlags] = await Promise.all([
+  const marketPromises = (properties as Property[]).map((p) => {
+    const slug = p.name.toLowerCase().includes('moab') ? 'moab' : 'bear-lake'
+    return getMarketSnapshot(p.id, slug as 'moab' | 'bear-lake').catch(() => null)
+  })
+  const [rulesOutputs, weatherFlags, marketSnapshots] = await Promise.all([
     Promise.all(rulesPromises),
     runWeatherEngine(),
+    Promise.all(marketPromises),
   ])
 
   // Build combined context for Claude
@@ -56,7 +67,7 @@ export async function generateWeeklyDigest(): Promise<{ subject: string; html: s
   today.setHours(0, 0, 0, 0)
   const in28Days = toDateStr(new Date(today.getTime() + 28 * 24 * 60 * 60 * 1000))
 
-  const propertyContexts = rulesOutputs.map((output: RulesEngineOutput) => {
+  const propertyContexts = rulesOutputs.map((output: RulesEngineOutput, idx: number) => {
     // Top 5 most urgent open dates (action level, soonest first)
     const urgentDates = output.open_dates
       .filter((d) => d.alert_level === 'action')
@@ -82,6 +93,17 @@ export async function generateWeeklyDigest(): Promise<{ subject: string; html: s
         multiplier: e.multiplier,
       }))
 
+    // Market snapshot (null if fetch failed or APIFY_TOKEN not set)
+    const marketData = marketSnapshots[idx]
+    const marketContext = marketData
+      ? {
+          avg_competitor_price: marketData.market.avg_price,
+          market_price_range: `${marketData.market.percentile_25}–${marketData.market.percentile_75}`,
+          competitor_count: marketData.market.sample_size,
+          market_occupancy_rate: marketData.market.market_occupancy_rate,
+        }
+      : null
+
     return {
       property_name: output.property_name,
       occupancy_pct_this_month: Math.round(output.occupancy_pct_this_month),
@@ -91,6 +113,7 @@ export async function generateWeeklyDigest(): Promise<{ subject: string; html: s
       upcoming_events: nearEvents,
       special_windows: output.special_windows,
       calendar_status: output.calendar_status,
+      market_snapshot: marketContext,
     }
   })
 

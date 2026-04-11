@@ -164,6 +164,8 @@ export default function MoabCalendarPage() {
       <DateSlideOver
         selected={selectedDate}
         rulesOutput={rulesOutput}
+        propertyId={property?.id ?? null}
+        slug="moab"
         onClose={() => setSelectedDate(null)}
       />
     </div>

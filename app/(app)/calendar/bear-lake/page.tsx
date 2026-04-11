@@ -166,6 +166,8 @@ export default function BearLakeCalendarPage() {
       <DateSlideOver
         selected={selectedDate}
         rulesOutput={rulesOutput}
+        propertyId={property?.id ?? null}
+        slug="bear-lake"
         onClose={() => setSelectedDate(null)}
       />
     </div>

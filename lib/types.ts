@@ -247,3 +247,35 @@ export interface BookingStats {
   last_year_revenue: number
   last_year_bookings: number
 }
+
+// ─── Phase 5 Types — Competitor Pricing ──────────────────────────────────────
+
+export interface CompetitorListing {
+  listing_id: string
+  name: string
+  price_per_night: number
+  rating: number | null
+  bedrooms: number | null
+  distance_miles: number | null
+  platform: 'airbnb'
+  url: string | null
+}
+
+export interface MarketSnapshot {
+  avg_price: number
+  median_price: number
+  percentile_25: number
+  percentile_75: number
+  sample_size: number
+  market_occupancy_rate: number | null
+  market_adr: number | null
+  airroi_cached: boolean
+  cached_at: string
+}
+
+export interface CompetitorPricingData {
+  property_id: string
+  slug: string
+  competitors: CompetitorListing[]
+  market: MarketSnapshot
+}

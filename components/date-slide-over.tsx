@@ -1,12 +1,14 @@
 'use client'
 
-import { useEffect } from 'react'
-import type { RulesEngineOutput } from '@/lib/types'
+import { useEffect, useState, useCallback } from 'react'
+import type { RulesEngineOutput, CompetitorPricingData } from '@/lib/types'
 import type { SelectedDate } from './calendar-view'
 
 interface DateSlideOverProps {
   selected: SelectedDate | null
   rulesOutput: RulesEngineOutput | null
+  propertyId: string | null
+  slug: 'moab' | 'bear-lake' | null
   onClose: () => void
 }
 
@@ -27,7 +29,41 @@ function fmtFull(dateStr: string) {
   })
 }
 
-export function DateSlideOver({ selected, rulesOutput, onClose }: DateSlideOverProps) {
+export function DateSlideOver({ selected, rulesOutput, propertyId, slug, onClose }: DateSlideOverProps) {
+  const [competitorData, setCompetitorData] = useState<CompetitorPricingData | null>(null)
+  const [competitorLoading, setCompetitorLoading] = useState(false)
+  const [competitorError, setCompetitorError] = useState<string | null>(null)
+
+  const fetchCompetitors = useCallback(async (forceRefresh = false) => {
+    if (!propertyId || !slug) return
+    setCompetitorLoading(true)
+    setCompetitorError(null)
+    try {
+      const url = `/api/competitor-pricing?property_id=${propertyId}&slug=${slug}${forceRefresh ? '&refresh=true' : ''}`
+      const res = await fetch(url)
+      if (!res.ok) {
+        const err = await res.json() as { error?: string }
+        throw new Error(err.error ?? 'Failed to load competitor data')
+      }
+      const data = await res.json() as CompetitorPricingData
+      setCompetitorData(data)
+    } catch (err) {
+      setCompetitorError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setCompetitorLoading(false)
+    }
+  }, [propertyId, slug])
+
+  // Load competitor data when panel opens
+  useEffect(() => {
+    if (selected) {
+      fetchCompetitors(false)
+    } else {
+      setCompetitorData(null)
+      setCompetitorError(null)
+    }
+  }, [selected, fetchCompetitors])
+
   // Close on Escape
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -273,38 +309,169 @@ export function DateSlideOver({ selected, rulesOutput, onClose }: DateSlideOverP
             </section>
           )}
 
-          {/* Competitor Pricing — Placeholder */}
-          <section>
-            <h4 className="text-slate-400 text-xs font-medium uppercase tracking-wide mb-2">
-              Competitor Pricing
-            </h4>
-            <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 opacity-60">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-slate-400 text-sm">Coming Soon</span>
-                <span className="text-xs bg-slate-700 text-slate-400 px-2 py-0.5 rounded-full">
-                  Planned
-                </span>
+          {/* Competitor Pricing */}
+          {!isBooked && !isDead && (
+            <section>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-slate-400 text-xs font-medium uppercase tracking-wide">
+                  Competitor Pricing
+                </h4>
+                <button
+                  onClick={() => fetchCompetitors(true)}
+                  disabled={competitorLoading}
+                  className="text-xs text-blue-400 hover:text-blue-300 disabled:text-slate-500 transition-colors"
+                >
+                  {competitorLoading ? 'Refreshing…' : '↻ Refresh'}
+                </button>
               </div>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Market Average</span>
-                  <span className="text-slate-600">—</span>
+
+              {competitorLoading && !competitorData && (
+                <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 space-y-2 animate-pulse">
+                  <div className="h-3 bg-slate-700 rounded w-3/4" />
+                  <div className="h-3 bg-slate-700 rounded w-1/2" />
+                  <div className="h-3 bg-slate-700 rounded w-2/3" />
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Your Price Rank</span>
-                  <span className="text-slate-600">—</span>
+              )}
+
+              {competitorError && !competitorData && (
+                <div className="bg-red-900/20 border border-red-500/30 rounded-lg p-3">
+                  <p className="text-red-400 text-xs">{competitorError}</p>
+                  <p className="text-slate-500 text-xs mt-1">
+                    Make sure APIFY_TOKEN is set in your environment variables.
+                  </p>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Price Gap</span>
-                  <span className="text-slate-600">—</span>
-                </div>
-              </div>
-              <p className="text-slate-600 text-xs mt-3">
-                {/* TODO: Connect PriceLabs Market Dashboard or AirDNA API. Start with AirROI (airroi.com — free, no account required). */}
-                Planned sources: AirROI (free), PriceLabs Market Dashboard ($9.99/mo), AirDNA
-              </p>
-            </div>
-          </section>
+              )}
+
+              {competitorData && (() => {
+                const { market, competitors } = competitorData
+                const yourMidPrice = priceLow && priceHigh ? Math.round((priceLow + priceHigh) / 2) : null
+                const pctVsMarket = yourMidPrice && market.avg_price > 0
+                  ? Math.round(((yourMidPrice - market.avg_price) / market.avg_price) * 100)
+                  : null
+
+                // Price rank: how many competitors are cheaper than you
+                const rank = yourMidPrice
+                  ? competitors.filter(c => c.price_per_night < yourMidPrice).length + 1
+                  : null
+
+                // Top 3 cheapest competitors
+                const cheapest = [...competitors]
+                  .sort((a, b) => a.price_per_night - b.price_per_night)
+                  .slice(0, 3)
+
+                const cacheAge = market.cached_at
+                  ? Math.round((Date.now() - new Date(market.cached_at).getTime()) / (1000 * 60 * 60))
+                  : null
+
+                return (
+                  <div className="space-y-3">
+                    {/* Market stats */}
+                    <div className="bg-slate-800 border border-slate-600 rounded-lg p-3 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400 text-sm">Market avg</span>
+                        <span className="text-white font-semibold">{fmt(market.avg_price)}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400 text-sm">Market range</span>
+                        <span className="text-slate-300 text-sm">
+                          {fmt(market.percentile_25)} – {fmt(market.percentile_75)}
+                        </span>
+                      </div>
+                      {yourMidPrice && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-400 text-sm">Your price vs. market</span>
+                          <span className={`text-sm font-medium ${
+                            pctVsMarket === null ? 'text-slate-400'
+                            : pctVsMarket > 15 ? 'text-red-400'
+                            : pctVsMarket < -10 ? 'text-emerald-400'
+                            : 'text-slate-300'
+                          }`}>
+                            {pctVsMarket === null ? '—'
+                              : pctVsMarket > 0 ? `+${pctVsMarket}% above`
+                              : pctVsMarket < 0 ? `${pctVsMarket}% below`
+                              : 'At market'}
+                          </span>
+                        </div>
+                      )}
+                      {rank !== null && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-400 text-sm">Price rank</span>
+                          <span className="text-slate-300 text-sm">
+                            #{rank} of {competitors.length} comparable listings
+                          </span>
+                        </div>
+                      )}
+                      {market.market_occupancy_rate !== null && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-400 text-sm">Market occupancy</span>
+                          <span className="text-slate-300 text-sm">
+                            {Math.round(market.market_occupancy_rate * 100)}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Visual price bar */}
+                    {yourMidPrice && market.percentile_25 > 0 && (
+                      <div className="bg-slate-800 border border-slate-600 rounded-lg p-3">
+                        <p className="text-slate-400 text-xs mb-2">Price position vs. market</p>
+                        <div className="relative h-2 bg-slate-700 rounded-full overflow-hidden">
+                          {/* Market range bar */}
+                          <div
+                            className="absolute top-0 h-full bg-blue-900/60 rounded-full"
+                            style={{
+                              left: `${Math.max(0, Math.min(90, ((market.percentile_25 / (market.percentile_75 * 1.3)) * 100)))}%`,
+                              width: `${Math.min(60, ((market.percentile_75 - market.percentile_25) / (market.percentile_75 * 1.3)) * 100)}%`,
+                            }}
+                          />
+                          {/* Your price indicator */}
+                          <div
+                            className="absolute top-0 w-1 h-full bg-white rounded-full"
+                            style={{
+                              left: `${Math.max(2, Math.min(96, (yourMidPrice / (market.percentile_75 * 1.3)) * 100))}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="flex justify-between mt-1">
+                          <span className="text-slate-600 text-xs">Low</span>
+                          <span className="text-slate-400 text-xs">You: {fmt(yourMidPrice)}</span>
+                          <span className="text-slate-600 text-xs">High</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Top 3 cheapest competitors */}
+                    {cheapest.length > 0 && (
+                      <div>
+                        <p className="text-slate-500 text-xs mb-1.5">Lowest-priced competitors</p>
+                        <div className="space-y-1.5">
+                          {cheapest.map((c) => (
+                            <div key={c.listing_id} className="flex items-center justify-between bg-slate-800/50 rounded-lg px-3 py-2">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-slate-300 text-xs truncate">{c.name || 'Airbnb listing'}</p>
+                                {c.rating !== null && (
+                                  <p className="text-slate-500 text-xs">★ {c.rating.toFixed(1)}</p>
+                                )}
+                              </div>
+                              <span className="text-white text-sm font-medium ml-3 shrink-0">
+                                {fmt(c.price_per_night)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Cache age + source */}
+                    <p className="text-slate-600 text-xs">
+                      {market.sample_size} listings · updated {cacheAge !== null ? `${cacheAge}h ago` : 'just now'} · Airbnb via Apify
+                      {market.airroi_cached ? ' + AirROI' : ''}
+                    </p>
+                  </div>
+                )
+              })()}
+            </section>
+          )}
         </div>
       </div>
     </>
