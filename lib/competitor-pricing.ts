@@ -479,23 +479,12 @@ export async function fetchAirROIMarket(
     // Unwrap .data wrapper if present
     const s = (summaryData.data ?? summaryData) as Record<string, unknown>
 
-    // ADR — try all known field names from AirROI docs
-    const adr =
-      s.avg_rate != null ? Number(s.avg_rate) :
-      s.average_daily_rate != null ? Number(s.average_daily_rate) :
-      s.averageDailyRate != null ? Number(s.averageDailyRate) :
-      s.adr != null ? Number(s.adr) :
-      s.avg_daily_rate != null ? Number(s.avg_daily_rate) :
-      null
+    // Confirmed field names from live AirROI /markets/summary response:
+    // { occupancy: 0.49, average_daily_rate: 299.5, rev_par: 151.7, ... }
+    const adr = s.average_daily_rate != null ? Number(s.average_daily_rate) : null
+    const occupancy_rate = s.occupancy != null ? Number(s.occupancy) : null
 
-    // Occupancy — try all known field names
-    const occupancy_rate =
-      s.occupancy_rate != null ? Number(s.occupancy_rate) :
-      s.occupancyRate != null ? Number(s.occupancyRate) :
-      s.occupancy != null ? Number(s.occupancy) :
-      null
-
-    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}, all keys: ${Object.keys(s).join(', ')}`)
+    console.log(`AirROI parsed — ADR: ${adr}, occupancy: ${occupancy_rate}`)
     return { adr, occupancy_rate }
   } catch (err) {
     console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
