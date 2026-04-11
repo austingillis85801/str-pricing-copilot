@@ -224,10 +224,14 @@ async function readCache(propertyId: string): Promise<CompetitorData | null> {
     const age = Date.now() - new Date(data.fetched_at as string).getTime()
     if (age > CACHE_TTL_MS) return null // stale
 
+    // Don't serve cached empty results — force a fresh fetch
+    const competitors = data.competitors as CompetitorListing[]
+    if (!competitors || competitors.length === 0) return null
+
     return {
       property_id: propertyId,
       slug: data.slug as string,
-      competitors: data.competitors as CompetitorListing[],
+      competitors,
       market: data.market_snapshot as MarketSnapshot,
     }
   } catch {
@@ -280,8 +284,10 @@ export async function getMarketSnapshot(
 
   const market = buildMarketSnapshot(listings, airroi)
 
-  // Write to cache (best-effort)
-  await writeCache(propertyId, slug, listings, market)
+  // Only cache if we actually got results — never cache empty data
+  if (listings.length > 0) {
+    await writeCache(propertyId, slug, listings, market)
+  }
 
   return { property_id: propertyId, slug, competitors: listings, market }
 }
