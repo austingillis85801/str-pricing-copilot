@@ -59,7 +59,8 @@ const CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1000
 //   2. checkApifyRun() → polls run status (<1s per call)
 //   3. fetchApifyResults() → fetches dataset items when run is SUCCEEDED (<2s)
 
-const APIFY_ACTOR = 'dtrungtin~airbnb-scraper'
+// tri_angle~airbnb-scraper — maintained by Apify, returns full listing details
+const APIFY_ACTOR = 'tri_angle~airbnb-scraper'
 
 /** Start an Apify actor run. Returns the run ID instantly. */
 export async function startApifyRun(
@@ -144,45 +145,125 @@ export async function fetchApifyResults(
 
   if (items.length > 0) {
     console.log('Apify sample item keys:', Object.keys(items[0]))
-    console.log('Apify sample item:', JSON.stringify(items[0]).slice(0, 500))
+    // Log price structure to help debug
+    const first = items[0]
+    const priceObj = first.price as Record<string, unknown> | undefined
+    console.log('Apify price sample:', JSON.stringify(priceObj).slice(0, 300))
+    console.log('Apify extracted price:', extractPrice(first))
   } else {
     console.warn('Apify returned 0 items')
   }
 
   return items
-    .map((item) => {
-      const price = extractPrice(item)
-      return {
-        listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
-        name: String(item.name ?? item.title ?? ''),
-        price_per_night: price,
-        rating: item.rating != null ? Number(item.rating) : (item.stars != null ? Number(item.stars) : null),
-        bedrooms: item.bedrooms != null ? Number(item.bedrooms) : null,
-        distance_miles: null,
-        platform: 'airbnb' as const,
-        url: item.url ? String(item.url) : null,
-      }
-    })
+    .map((item) => ({
+      listing_id: String(item.id ?? item.listingId ?? item.listing_id ?? ''),
+      name: String(item.title ?? item.name ?? ''),
+      price_per_night: extractPrice(item),
+      rating: extractRating(item),
+      bedrooms: extractBedrooms(item),
+      distance_miles: null,
+      platform: 'airbnb' as const,
+      url: item.url ? String(item.url) : null,
+    }))
     .filter((item) => item.price_per_night > 0)
     .slice(0, maxListings)
 }
 
-// Parse price from various formats Apify may return
+/**
+ * Extract per-night price from a tri_angle~airbnb-scraper item.
+ *
+ * The actor returns price as a nested object. Nightly price is stored in:
+ *   price.breakDown.basePrice.description = "5 nights x $111.23"
+ * or if qualifier === "night":
+ *   price.price = "$107"
+ */
 function extractPrice(item: Record<string, unknown>): number {
-  for (const key of ['price', 'pricing.rate.amount', 'rate', 'basePrice', 'pricePerNight']) {
+  const priceObj = item.price as Record<string, unknown> | undefined
+
+  if (priceObj) {
+    // Primary: parse per-night rate from breakdown description "N nights x $XXX.XX"
+    const breakDown = priceObj.breakDown as Record<string, unknown> | undefined
+    const basePrice = breakDown?.basePrice as Record<string, unknown> | undefined
+    const description = typeof basePrice?.description === 'string' ? basePrice.description : ''
+    if (description) {
+      // "5 nights x $111.23"  or  "1 night x $200"
+      const m = description.match(/x\s*\$([0-9,]+(?:\.[0-9]+)?)/)
+      if (m) {
+        const v = parseFloat(m[1].replace(',', ''))
+        if (!isNaN(v) && v > 0) return v
+      }
+    }
+
+    // Secondary: if qualifier is "night", price.price is already per-night
+    if (priceObj.qualifier === 'night') {
+      for (const key of ['price', 'amount', 'originalPrice', 'discountedPrice']) {
+        const raw = priceObj[key]
+        if (typeof raw === 'string') {
+          const v = parseFloat(raw.replace(/[^0-9.]/g, ''))
+          if (!isNaN(v) && v > 0) return v
+        }
+        if (typeof raw === 'number' && raw > 0) return raw
+      }
+    }
+
+    // Tertiary: try price.label "e.g. $107 per night"
+    if (typeof priceObj.label === 'string' && priceObj.label.includes('per night')) {
+      const m = priceObj.label.match(/\$([0-9,]+(?:\.[0-9]+)?)/)
+      if (m) {
+        const v = parseFloat(m[1].replace(',', ''))
+        if (!isNaN(v) && v > 0) return v
+      }
+    }
+  }
+
+  // Legacy fallbacks for other actor formats
+  for (const key of ['pricePerNight', 'basePrice', 'rate']) {
     const val = item[key]
     if (typeof val === 'number' && val > 0) return val
   }
-  const pricing = item.pricing as Record<string, unknown> | undefined
-  if (pricing) {
-    const rate = pricing.rate as Record<string, unknown> | undefined
-    if (rate?.amount && typeof rate.amount === 'number') return rate.amount
-    if (pricing.price && typeof pricing.price === 'number') return pricing.price
-  }
-  const priceStr = String(item.price ?? item.rate ?? '')
-  const parsed = parseFloat(priceStr.replace(/[^0-9.]/g, ''))
-  if (!isNaN(parsed) && parsed > 0) return parsed
+
   return 0
+}
+
+/**
+ * Extract overall guest rating.
+ * tri_angle actor: rating is an object with guestSatisfaction field.
+ */
+function extractRating(item: Record<string, unknown>): number | null {
+  const r = item.rating as Record<string, unknown> | undefined
+  if (r != null) {
+    if (typeof r.guestSatisfaction === 'number') return r.guestSatisfaction
+    if (typeof r === 'number') return r as unknown as number
+  }
+  if (typeof item.stars === 'number') return item.stars
+  return null
+}
+
+/**
+ * Extract bedroom count.
+ * tri_angle actor: subDescription.items = ["8 guests", "3 bedrooms", "4 beds", "2.5 baths"]
+ */
+function extractBedrooms(item: Record<string, unknown>): number | null {
+  // Direct field first
+  if (typeof item.bedrooms === 'number') return item.bedrooms
+
+  // Parse from subDescription.items
+  const sub = item.subDescription as { items?: unknown[] } | undefined
+  if (Array.isArray(sub?.items)) {
+    const bedroomStr = sub.items.find(
+      (s): s is string => typeof s === 'string' && s.includes('bedroom')
+    )
+    if (bedroomStr) {
+      const m = bedroomStr.match(/(\d+)/)
+      if (m) return parseInt(m[1])
+    }
+    // "Studio" → treat as 0 bedrooms (small unit)
+    if (sub.items.some((s): s is string => typeof s === 'string' && s.toLowerCase() === 'studio')) {
+      return 0
+    }
+  }
+
+  return null
 }
 
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
