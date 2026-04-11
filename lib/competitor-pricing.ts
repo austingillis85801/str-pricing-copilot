@@ -544,50 +544,53 @@ export async function fetchAirROIComparables(
       return []
     }
 
+    // Confirmed field names from live /listings/comparables response:
+    // listing_info:       { listing_id, listing_name, listing_type, room_type }
+    // location_info:      { latitude, longitude }
+    // property_details:   { bedrooms, baths, guests }
+    // pricing_info:       { cleaning_fee, ... } — NO nightly rate here
+    // ratings:            { rating_overall, num_reviews }
+    // performance_metrics:{ ttm_avg_rate, ttm_occupancy, l90d_avg_rate, l90d_occupancy }
+
     return items
       .map((item): CompetitorListing | null => {
-        // listing_info, location_info, property_details, pricing_info, ratings
-        const listingInfo = item.listing_info as Record<string, unknown> | undefined
-        const locationInfo = item.location_info as Record<string, unknown> | undefined
-        const propertyDetails = item.property_details as Record<string, unknown> | undefined
-        const pricingInfo = item.pricing_info as Record<string, unknown> | undefined
-        const ratings = item.ratings as Record<string, unknown> | undefined
+        const listingInfo  = item.listing_info        as Record<string, unknown> | undefined
+        const locationInfo = item.location_info       as Record<string, unknown> | undefined
+        const propDetails  = item.property_details    as Record<string, unknown> | undefined
+        const ratings      = item.ratings             as Record<string, unknown> | undefined
+        const perfMetrics  = item.performance_metrics as Record<string, unknown> | undefined
 
-        const id = String(item.id ?? item.listing_id ?? '')
-        const name = String(listingInfo?.name ?? item.name ?? item.title ?? '')
+        const id   = String(listingInfo?.listing_id ?? item.id ?? '')
+        const name = String(listingInfo?.listing_name ?? listingInfo?.name ?? '')
 
-        // Extract nightly rate from pricing_info
+        // Price is in performance_metrics — ttm_avg_rate = trailing 12-month avg nightly rate
+        // Fall back to l90d_avg_rate (last 90 days) if ttm isn't available
         const nightlyRate =
-          typeof pricingInfo?.nightly_rate === 'number' ? pricingInfo.nightly_rate :
-          typeof pricingInfo?.rate === 'number' ? pricingInfo.rate :
-          typeof pricingInfo?.price === 'number' ? pricingInfo.price :
-          typeof item.nightly_rate === 'number' ? item.nightly_rate :
-          0
+          typeof perfMetrics?.ttm_avg_rate === 'number' && perfMetrics.ttm_avg_rate > 0
+            ? perfMetrics.ttm_avg_rate
+            : typeof perfMetrics?.l90d_avg_rate === 'number' && perfMetrics.l90d_avg_rate > 0
+            ? perfMetrics.l90d_avg_rate
+            : 0
 
         if (nightlyRate <= 0) return null
 
-        // Distance from our property
-        const itemLat = typeof locationInfo?.latitude === 'number' ? locationInfo.latitude : null
+        const itemLat = typeof locationInfo?.latitude  === 'number' ? locationInfo.latitude  : null
         const itemLng = typeof locationInfo?.longitude === 'number' ? locationInfo.longitude : null
         const distanceMiles = itemLat != null && itemLng != null
           ? Math.round(haversineDistanceMiles(lat, lng, itemLat, itemLng) * 10) / 10
           : null
 
         const rating =
-          typeof ratings?.overall === 'number' ? ratings.overall :
-          typeof item.rating === 'number' ? item.rating :
-          null
+          typeof ratings?.rating_overall === 'number' ? ratings.rating_overall : null
 
         const listingBedrooms =
-          typeof propertyDetails?.bedrooms === 'number' ? propertyDetails.bedrooms :
-          typeof item.bedrooms === 'number' ? item.bedrooms :
-          null
+          typeof propDetails?.bedrooms === 'number' ? propDetails.bedrooms : null
 
-        const propertyType = String(
-          propertyDetails?.property_type ?? listingInfo?.room_type ?? item.property_type ?? ''
-        ) || null
+        // listing_type e.g. "Entire townhouse", room_type e.g. "entire_home"
+        const propertyType = String(listingInfo?.listing_type ?? listingInfo?.room_type ?? '') || null
 
-        const itemUrl = String(listingInfo?.url ?? item.url ?? '') || null
+        // Construct Airbnb URL from listing_id
+        const itemUrl = id ? `https://www.airbnb.com/rooms/${id}` : null
 
         return {
           listing_id: id,
