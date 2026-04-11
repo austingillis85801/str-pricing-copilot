@@ -3,11 +3,10 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 
 /**
- * GET /api/debug/airroi?lat=38.5153&lng=-109.4892&bedrooms=2
+ * GET /api/debug/airroi?lat=38.5153&lng=-109.4892&bedrooms=2&baths=2&guests=4
  *
- * Tests the correct AirROI two-step flow:
- *   1. GET /markets/search?latitude=&longitude= → get market {country,region,locality,district}
- *   2. POST /markets/summary with market + bedroom filter → get ADR + occupancy
+ * Tests /listings/comparables and shows the full raw response so we can
+ * identify field names and why 0 listings are returned.
  */
 export async function GET(request: Request) {
   const session = await getServerSession(authOptions)
@@ -17,64 +16,64 @@ export async function GET(request: Request) {
   if (!apiKey) return NextResponse.json({ error: 'AIRROI_API_KEY not set' }, { status: 500 })
 
   const { searchParams } = new URL(request.url)
-  const lat = parseFloat(searchParams.get('lat') ?? '38.5153')
-  const lng = parseFloat(searchParams.get('lng') ?? '-109.4892')
-  const bedrooms = searchParams.get('bedrooms') ? parseInt(searchParams.get('bedrooms')!) : 2
+  const lat   = searchParams.get('lat')       ?? '38.5153'
+  const lng   = searchParams.get('lng')       ?? '-109.4892'
+  const beds  = searchParams.get('bedrooms')  ?? '2'
+  const baths = searchParams.get('baths')     ?? '2'
+  const guests= searchParams.get('guests')    ?? '4'
 
   const BASE = 'https://api.airroi.com'
   const headers = { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }
 
-  // Step 1: /markets/lookup with lat/lng (confirmed working — returns country/region/locality)
-  let marketData: Record<string, unknown> = {}
-  let step1Status = 0
+  // Try several param name variants — docs may differ from actual API
+  const attempts = [
+    `${BASE}/listings/comparables?latitude=${lat}&longitude=${lng}&bedrooms=${beds}&baths=${baths}&guests=${guests}&currency=usd`,
+    `${BASE}/listings/comparables?lat=${lat}&lng=${lng}&bedrooms=${beds}&baths=${baths}&guests=${guests}&currency=usd`,
+    `${BASE}/listings/comparables?latitude=${lat}&longitude=${lng}&bedrooms=${beds}&bathrooms=${baths}&guests=${guests}&currency=usd`,
+    `${BASE}/listings/comparables?latitude=${lat}&longitude=${lng}&bedrooms=${beds}&baths=${baths}&guests=${guests}`,
+  ]
 
-  try {
-    const r = await fetch(`${BASE}/markets/lookup?lat=${lat}&lng=${lng}`, {
-      headers, signal: AbortSignal.timeout(12_000),
-    })
-    step1Status = r.status
-    const text = await r.text()
-    try { marketData = JSON.parse(text) } catch { marketData = { raw: text } }
-  } catch (err) {
-    return NextResponse.json({ error: `Step 1 failed: ${err}` }, { status: 500 })
-  }
-
-  const mkt = (marketData.data ?? marketData) as Record<string, unknown>
-  const { country, region, locality, district } = mkt as {
-    country?: string; region?: string; locality?: string; district?: string | null
-  }
-
-  // Step 2: /markets/summary with bedroom filter
-  let summaryData: unknown = null
-  let step2Status = 0
-
-  if (country && region && locality) {
+  const results = []
+  for (const url of attempts) {
     try {
-      const r = await fetch(`${BASE}/markets/summary`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          market: { country, region, locality, district: district ?? null },
-          filter: {
-            bedrooms: { range: [Math.max(0, bedrooms - 1), bedrooms + 1] },
-            room_type: { eq: 'entire_home' },
-          },
-          num_months: 12,
-          currency: 'usd',
-        }),
-        signal: AbortSignal.timeout(12_000),
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(12_000) })
+      const text = await res.text()
+      let parsed: unknown = text
+      try { parsed = JSON.parse(text) } catch { /* not json */ }
+
+      const topKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed as object) : []
+
+      // If it's an array or has a listings key, show first item keys too
+      let firstItemKeys: string[] = []
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        firstItemKeys = Object.keys(parsed[0] as object)
+      } else if (parsed && typeof parsed === 'object') {
+        const p = parsed as Record<string, unknown>
+        const arr = p.listings ?? p.data ?? p.results
+        if (Array.isArray(arr) && arr.length > 0) {
+          firstItemKeys = Object.keys(arr[0] as object)
+        }
+      }
+
+      results.push({
+        url: url.replace(/api_key=[^&]+/, 'api_key=***'),
+        status: res.status,
+        ok: res.ok,
+        top_level_keys: topKeys,
+        first_item_keys: firstItemKeys,
+        // Show full response if small, truncated if large
+        raw: JSON.stringify(parsed).length < 3000 ? parsed : JSON.stringify(parsed).slice(0, 3000) + '…',
       })
-      step2Status = r.status
-      const text = await r.text()
-      try { summaryData = JSON.parse(text) } catch { summaryData = text }
+
+      if (res.ok) break // stop on first success
     } catch (err) {
-      summaryData = { error: String(err) }
+      results.push({ url, status: 0, ok: false, error: String(err) })
     }
   }
 
   return NextResponse.json({
-    step1_market_search: { status: step1Status, market: mkt },
-    step2_summary: { status: step2Status, data: summaryData },
+    property: { lat, lng, bedrooms: beds, baths, guests },
     api_key_prefix: apiKey.slice(0, 6) + '...',
+    attempts: results,
   })
 }
