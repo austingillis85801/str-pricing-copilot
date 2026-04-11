@@ -9,10 +9,41 @@ type ImportPlatform = 'airbnb' | 'vrbo'
 interface SectionState {
   platform: ImportPlatform
   file: File | null
+  detectedListings: string[]   // listing names found in the CSV (Airbnb only)
+  selectedListing: string      // '' = import all, otherwise the chosen listing name
   loading: boolean
   result: ImportResult | null
   error: string | null
 }
+
+// ─────────────────────────────────────────────
+// Lightweight client-side CSV listing detector
+// ─────────────────────────────────────────────
+
+function extractListingNames(csvText: string): string[] {
+  const lines = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+  if (lines.length < 2) return []
+
+  // Find the "Listing" header index
+  const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase())
+  const listingIdx = headers.indexOf('listing')
+  if (listingIdx === -1) return []
+
+  const names = new Set<string>()
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line) continue
+    // Simple split — good enough for detecting listing names
+    const cols = line.split(',').map(c => c.replace(/^"|"$/g, '').trim())
+    const name = cols[listingIdx]
+    if (name) names.add(name)
+  }
+  return Array.from(names).sort()
+}
+
+// ─────────────────────────────────────────────
+// Import section component
+// ─────────────────────────────────────────────
 
 function ImportSection({
   property,
@@ -27,6 +58,26 @@ function ImportSection({
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const handleFileChange = async (f: File | null) => {
+    if (!f || state.platform !== 'airbnb') {
+      onChange({ file: f, detectedListings: [], selectedListing: '', result: null, error: null })
+      return
+    }
+    // Read the CSV client-side to detect listing names
+    const text = await f.text()
+    const listings = extractListingNames(text)
+    onChange({
+      file: f,
+      detectedListings: listings,
+      // Auto-select if only one listing found, otherwise let the user pick
+      selectedListing: listings.length === 1 ? listings[0] : '',
+      result: null,
+      error: null,
+    })
+  }
+
+  const showListingPicker = state.platform === 'airbnb' && state.detectedListings.length > 1
+
   return (
     <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
       <div className="flex items-start justify-between gap-4 mb-5">
@@ -37,7 +88,7 @@ function ImportSection({
         <div className="shrink-0">
           <select
             value={state.platform}
-            onChange={e => onChange({ platform: e.target.value as ImportPlatform, file: null, result: null, error: null })}
+            onChange={e => onChange({ platform: e.target.value as ImportPlatform, file: null, detectedListings: [], selectedListing: '', result: null, error: null })}
             className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           >
             <option value="airbnb">Airbnb CSV</option>
@@ -50,7 +101,7 @@ function ImportSection({
       <div className="bg-slate-800/50 rounded-lg px-4 py-3 mb-4 text-xs text-slate-400 border border-slate-700/40">
         {state.platform === 'airbnb' ? (
           <>
-            <span className="font-medium text-slate-300">Airbnb:</span> Export the &quot;Reservations&quot; report from your Host dashboard. Make sure it includes Confirmation code, Start date, End date, Nights, Payout, and Status columns.
+            <span className="font-medium text-slate-300">Airbnb:</span> In your Host dashboard go to <span className="text-slate-300">Menu → Reservations</span>, then click <span className="text-slate-300">Export to CSV</span>. The report should include columns for Confirmation code, Start date, End date, # of nights, Earnings, Status, and Listing. If your account has multiple properties, the file will contain all of them — use the listing selector below to import one at a time.
           </>
         ) : (
           <>
@@ -73,10 +124,7 @@ function ImportSection({
           type="file"
           accept=".csv"
           className="hidden"
-          onChange={e => {
-            const f = e.target.files?.[0] ?? null
-            onChange({ file: f, result: null, error: null })
-          }}
+          onChange={e => handleFileChange(e.target.files?.[0] ?? null)}
         />
         {state.file ? (
           <div className="flex items-center justify-center gap-2">
@@ -86,7 +134,7 @@ function ImportSection({
             <span className="text-blue-400 text-sm font-medium">{state.file.name}</span>
             <button
               type="button"
-              onClick={e => { e.stopPropagation(); onChange({ file: null, result: null, error: null }) }}
+              onClick={e => { e.stopPropagation(); onChange({ file: null, detectedListings: [], selectedListing: '', result: null, error: null }) }}
               className="text-slate-500 hover:text-slate-300 ml-1"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -103,6 +151,28 @@ function ImportSection({
           </>
         )}
       </div>
+
+      {/* Listing selector — shown when CSV has multiple listings */}
+      {showListingPicker && (
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-slate-400 mb-1.5">
+            Multiple listings detected — select which one to import
+          </label>
+          <select
+            value={state.selectedListing}
+            onChange={e => onChange({ selectedListing: e.target.value, result: null, error: null })}
+            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2.5 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          >
+            <option value="">— Choose a listing —</option>
+            {state.detectedListings.map(name => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+          <p className="text-xs text-slate-500 mt-1.5">
+            Import one listing at a time so bookings are matched to the correct property.
+          </p>
+        </div>
+      )}
 
       {/* Error */}
       {state.error && (
@@ -136,7 +206,7 @@ function ImportSection({
 
       <button
         onClick={onImport}
-        disabled={!state.file || state.loading}
+        disabled={!state.file || state.loading || (showListingPicker && !state.selectedListing)}
         className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium rounded-lg px-4 py-2.5 text-sm transition-colors duration-150"
       >
         {state.loading ? (
@@ -160,6 +230,10 @@ function ImportSection({
   )
 }
 
+// ─────────────────────────────────────────────
+// Page
+// ─────────────────────────────────────────────
+
 export default function ImportPage() {
   const [properties, setProperties] = useState<Property[]>([])
   const [loading, setLoading] = useState(true)
@@ -174,7 +248,15 @@ export default function ImportPage() {
         setProperties(props)
         const initial: Record<string, SectionState> = {}
         for (const p of props) {
-          initial[p.id] = { platform: 'airbnb', file: null, loading: false, result: null, error: null }
+          initial[p.id] = {
+            platform: 'airbnb',
+            file: null,
+            detectedListings: [],
+            selectedListing: '',
+            loading: false,
+            result: null,
+            error: null,
+          }
         }
         setSections(initial)
       })
@@ -190,12 +272,21 @@ export default function ImportPage() {
     const section = sections[property.id]
     if (!section?.file) return
 
+    // If multiple listings detected and none selected, block the import
+    if (section.detectedListings.length > 1 && !section.selectedListing) {
+      updateSection(property.id, { error: 'Please select which listing to import.' })
+      return
+    }
+
     updateSection(property.id, { loading: true, error: null, result: null })
 
     const formData = new FormData()
     formData.append('file', section.file)
     formData.append('propertyId', property.id)
     formData.append('platform', section.platform)
+    if (section.selectedListing) {
+      formData.append('listingName', section.selectedListing)
+    }
 
     try {
       const res = await fetch('/api/import', {
@@ -244,7 +335,15 @@ export default function ImportPage() {
             <ImportSection
               key={property.id}
               property={property}
-              state={sections[property.id] ?? { platform: 'airbnb', file: null, loading: false, result: null, error: null }}
+              state={sections[property.id] ?? {
+                platform: 'airbnb',
+                file: null,
+                detectedListings: [],
+                selectedListing: '',
+                loading: false,
+                result: null,
+                error: null,
+              }}
               onChange={update => updateSection(property.id, update)}
               onImport={() => handleImport(property)}
             />

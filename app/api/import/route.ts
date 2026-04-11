@@ -96,31 +96,43 @@ interface ParsedBooking {
   booking_date: string | null
 }
 
-function parseAirbnbCsv(rows: Record<string, string>[]): ParsedBooking[] {
+function parseAirbnbCsv(rows: Record<string, string>[], listingFilter?: string): ParsedBooking[] {
   const results: ParsedBooking[] = []
 
   for (const row of rows) {
     const status = findColumn(row, ['Status', 'status'])
-    // Only import Reserved or Completed; skip Cancelled at Airbnb level
-    if (!['reserved', 'completed'].includes(status.toLowerCase())) continue
+    // Skip anything cancelled — accept Confirmed, Currently hosting, Past guest, Review guest, etc.
+    if (status.toLowerCase().includes('cancel')) continue
+    // Skip rows with no meaningful status (empty rows, headers)
+    if (!status) continue
+
+    // If a listing filter is provided, only import rows matching that listing
+    if (listingFilter) {
+      const listing = findColumn(row, ['Listing', 'listing'])
+      if (listing !== listingFilter) continue
+    }
 
     const external_booking_id = findColumn(row, ['Confirmation code', 'confirmation code', 'Confirmation Code'])
     if (!external_booking_id) continue
 
-    const checkInRaw = findColumn(row, ['Start date', 'start date', 'Start Date'])
+    const checkInRaw  = findColumn(row, ['Start date', 'start date', 'Start Date'])
     const checkOutRaw = findColumn(row, ['End date', 'end date', 'End Date'])
-    const check_in = parseDate(checkInRaw)
+    const check_in  = parseDate(checkInRaw)
     const check_out = parseDate(checkOutRaw)
     if (!check_in || !check_out) continue
 
-    const nightsRaw = findColumn(row, ['Nights', 'nights'])
+    // Airbnb exports "# of nights" — also handle plain "Nights"
+    const nightsRaw = findColumn(row, ['# of nights', '# Of Nights', 'Nights', 'nights'])
     let nights = parseInt(nightsRaw, 10)
     if (isNaN(nights) || nights <= 0) {
       nights = differenceInDays(parseISO(check_out), parseISO(check_in))
     }
     if (nights <= 0) continue
 
-    const total_revenue = parseMoney(findColumn(row, ['Payout', 'payout', 'Amount', 'amount']))
+    // Airbnb exports "Earnings" — also handle "Payout", "Amount"
+    const total_revenue = parseMoney(
+      findColumn(row, ['Earnings', 'earnings', 'Payout', 'payout', 'Amount', 'amount'])
+    )
 
     const bookingDateRaw = findColumn(row, ['Booked', 'booked', 'Booking date', 'booking date', 'Booking Date'])
     const booking_date = parseDate(bookingDateRaw)
@@ -131,18 +143,11 @@ function parseAirbnbCsv(rows: Record<string, string>[]): ParsedBooking[] {
       if (lead_time < 0) lead_time = null
     }
 
-    const nightly_rate = nights > 0 && total_revenue > 0 ? Math.round((total_revenue / nights) * 100) / 100 : null
+    const nightly_rate = nights > 0 && total_revenue > 0
+      ? Math.round((total_revenue / nights) * 100) / 100
+      : null
 
-    results.push({
-      external_booking_id,
-      check_in,
-      check_out,
-      nights,
-      total_revenue,
-      nightly_rate,
-      lead_time,
-      booking_date,
-    })
+    results.push({ external_booking_id, check_in, check_out, nights, total_revenue, nightly_rate, lead_time, booking_date })
   }
 
   return results
@@ -231,6 +236,7 @@ export async function POST(req: Request) {
   const file = formData.get('file') as File | null
   const propertyId = formData.get('propertyId') as string | null
   const platform = formData.get('platform') as 'airbnb' | 'vrbo' | null
+  const listingName = (formData.get('listingName') as string | null) || undefined
 
   if (!file || !propertyId || !platform) {
     return NextResponse.json({ error: 'Missing required fields: file, propertyId, platform' }, { status: 400 })
@@ -243,7 +249,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'CSV file is empty or could not be parsed' }, { status: 400 })
   }
 
-  const parsed = platform === 'airbnb' ? parseAirbnbCsv(rows) : parseVrboCsv(rows)
+  const parsed = platform === 'airbnb' ? parseAirbnbCsv(rows, listingName) : parseVrboCsv(rows)
 
   if (parsed.length === 0) {
     return NextResponse.json({ error: 'No valid bookings found in the CSV. Check that the file format matches the expected export.' }, { status: 400 })
