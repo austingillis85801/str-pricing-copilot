@@ -2,9 +2,21 @@ import { createServerSupabaseClient } from './supabase-server'
 
 // ─── Coordinates ──────────────────────────────────────────────────────────────
 
-export const PROPERTY_COORDS: Record<string, { lat: number; lng: number; label: string }> = {
-  moab: { lat: 38.5733, lng: -109.5498, label: 'Moab, UT' },
-  'bear-lake': { lat: 41.9377, lng: -111.343, label: 'Bear Lake, UT' },
+export const PROPERTY_COORDS: Record<string, { lat: number; lng: number; label: string; airbnbSearchUrl: string }> = {
+  moab: {
+    lat: 38.5733,
+    lng: -109.5498,
+    label: 'Moab, UT',
+    // Airbnb search URL for Moab — entire homes, sorted by price
+    airbnbSearchUrl: 'https://www.airbnb.com/s/Moab--UT--United-States/homes?adults=2&place_id=ChIJV2lfFqGZUIcR6e7cqvpJSFw&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
+  },
+  'bear-lake': {
+    lat: 41.9377,
+    lng: -111.343,
+    label: 'Bear Lake, UT',
+    // Airbnb search URL for Garden City / Bear Lake area
+    airbnbSearchUrl: 'https://www.airbnb.com/s/Garden-City--UT--United-States/homes?adults=2&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
+  },
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -46,25 +58,22 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 // ─── Apify — Live Airbnb competitor listings ──────────────────────────────────
 
 async function fetchApifyCompetitors(
-  lat: number,
-  lng: number,
+  airbnbSearchUrl: string,
   maxListings = 40
 ): Promise<CompetitorListing[]> {
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
 
   // Apify Airbnb Scraper actor: dtrungtin/airbnb-scraper
-  // We search by coordinates using a location string. Apify builds the search URL.
-  const locationQuery = `${lat},${lng}`
-
+  // Use startUrls with a real Airbnb search URL — most reliable input method.
+  // run-sync-get-dataset-items waits for the run to finish and returns results directly.
   const runRes = await fetch(
     'https://api.apify.com/v2/acts/dtrungtin~airbnb-scraper/run-sync-get-dataset-items?token=' + token,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        startUrls: [],
-        locationQuery,
+        startUrls: [{ url: airbnbSearchUrl }],
         maxListings,
         currency: 'USD',
         includeReviews: false,
@@ -233,7 +242,7 @@ export async function getMarketSnapshot(
 
   // Fetch both sources in parallel (AirROI failure is non-fatal)
   const [listings, airroi] = await Promise.all([
-    fetchApifyCompetitors(coords.lat, coords.lng),
+    fetchApifyCompetitors(coords.airbnbSearchUrl),
     fetchAirROIMarket(coords.lat, coords.lng),
   ])
 
