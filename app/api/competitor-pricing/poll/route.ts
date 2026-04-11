@@ -4,8 +4,10 @@ import { authOptions } from '@/lib/auth'
 import {
   checkApifyRun,
   fetchApifyResults,
+  fetchAirROIMarket,
   buildMarketSnapshot,
   writeCache,
+  PROPERTY_COORDS,
 } from '@/lib/competitor-pricing'
 
 /**
@@ -49,7 +51,12 @@ export async function GET(request: Request) {
       if (status === 'SUCCEEDED' && datasetId) {
         // Run finished — fetch results and cache them
         const listings = await fetchApifyResults(datasetId)
-        const market = buildMarketSnapshot(listings)
+        // Also fetch AirROI market data (non-fatal — enriches occupancy/ADR)
+        const coords = PROPERTY_COORDS[slug]
+        const airroi = coords
+          ? await fetchAirROIMarket(coords.lat, coords.lng)
+          : { adr: null, occupancy_rate: null }
+        const market = buildMarketSnapshot(listings, airroi)
 
         if (listings.length > 0) {
           await writeCache(propertyId, slug, listings, market)

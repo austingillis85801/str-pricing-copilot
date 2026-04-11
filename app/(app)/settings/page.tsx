@@ -12,6 +12,7 @@ const APIFY_SUBSCRIPTION_USD = 30 // hardcoded monthly plan cost
 
 interface ApifyUsage {
   usageUsd: number
+  runCount?: number
   cycleStart: string | null
   cycleEnd: string | null
 }
@@ -76,7 +77,7 @@ function ApifyBillingSection() {
                 {loading
                   ? 'Loading…'
                   : usage?.cycleStart
-                  ? `Cycle: ${fmtDate(usage.cycleStart)} – ${fmtDate(usage.cycleEnd)}`
+                  ? `${usage.runCount ?? 0} runs this cycle · ${fmtDate(usage.cycleStart)} – ${fmtDate(usage.cycleEnd)}`
                   : 'Current billing cycle'}
               </p>
             </div>

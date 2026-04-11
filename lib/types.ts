@@ -256,6 +256,7 @@ export interface CompetitorListing {
   price_per_night: number
   rating: number | null
   bedrooms: number | null
+  property_type: string | null
   distance_miles: number | null
   platform: 'airbnb'
   url: string | null

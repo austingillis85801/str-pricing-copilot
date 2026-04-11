@@ -25,6 +25,7 @@ export interface CompetitorListing {
   price_per_night: number
   rating: number | null
   bedrooms: number | null
+  property_type: string | null
   distance_miles: number | null
   platform: 'airbnb'
   url: string | null
@@ -62,6 +63,21 @@ const CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1000
 // tri_angle~airbnb-scraper — maintained by Apify, returns full listing details
 const APIFY_ACTOR = 'tri_angle~airbnb-scraper'
 
+/** Build an Airbnb search URL with next Monday→Sunday dates for consistent weekly pricing. */
+function addWeeklyDates(baseUrl: string): string {
+  const today = new Date()
+  // Days until next Monday (1=Mon ... 0=Sun treated as 7)
+  const dayOfWeek = today.getDay() === 0 ? 7 : today.getDay()
+  const daysUntilMonday = dayOfWeek === 1 ? 7 : 8 - dayOfWeek
+  const checkIn = new Date(today)
+  checkIn.setDate(today.getDate() + daysUntilMonday)
+  const checkOut = new Date(checkIn)
+  checkOut.setDate(checkIn.getDate() + 7)
+  const fmt = (d: Date) => d.toISOString().split('T')[0]
+  const sep = baseUrl.includes('?') ? '&' : '?'
+  return `${baseUrl}${sep}check_in=${fmt(checkIn)}&check_out=${fmt(checkOut)}`
+}
+
 /** Start an Apify actor run. Returns the run ID instantly. */
 export async function startApifyRun(
   airbnbSearchUrl: string,
@@ -70,13 +86,17 @@ export async function startApifyRun(
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
 
+  // Always request next Monday→Sunday to get a full week (weekday + weekend pricing)
+  // This makes market snapshots comparable run-to-run regardless of when cron fires
+  const datedUrl = addWeeklyDates(airbnbSearchUrl)
+
   const res = await fetch(
     `https://api.apify.com/v2/acts/${APIFY_ACTOR}/runs?token=${token}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        startUrls: [{ url: airbnbSearchUrl }],
+        startUrls: [{ url: datedUrl }],
         maxListings,
         currency: 'USD',
         includeReviews: false,
@@ -172,6 +192,7 @@ export async function fetchApifyResults(
       price_per_night: extractPrice(item),
       rating: extractRating(item),
       bedrooms: extractBedrooms(item),
+      property_type: typeof item.propertyType === 'string' ? item.propertyType : null,
       distance_miles: null,
       platform: 'airbnb' as const,
       url: item.url ? String(item.url) : null,
@@ -279,12 +300,15 @@ function extractBedrooms(item: Record<string, unknown>): number | null {
 
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
 
-async function fetchAirROIMarket(
+export async function fetchAirROIMarket(
   lat: number,
   lng: number
 ): Promise<{ adr: number | null; occupancy_rate: number | null }> {
   const apiKey = process.env.AIRROI_API_KEY
-  if (!apiKey) return { adr: null, occupancy_rate: null }
+  if (!apiKey) {
+    console.log('AirROI: AIRROI_API_KEY not set, skipping')
+    return { adr: null, occupancy_rate: null }
+  }
 
   try {
     const res = await fetch(
@@ -297,14 +321,31 @@ async function fetchAirROIMarket(
         signal: AbortSignal.timeout(15_000),
       }
     )
-    if (!res.ok) return { adr: null, occupancy_rate: null }
+    if (!res.ok) {
+      console.warn(`AirROI API error ${res.status}: ${await res.text().catch(() => '')}`)
+      return { adr: null, occupancy_rate: null }
+    }
 
     const data = await res.json() as Record<string, unknown>
-    return {
-      adr: data.avg_daily_rate != null ? Number(data.avg_daily_rate) : null,
-      occupancy_rate: data.occupancy_rate != null ? Number(data.occupancy_rate) : null,
-    }
-  } catch {
+    // Log raw response so we can confirm field names
+    console.log('AirROI raw response:', JSON.stringify(data).slice(0, 500))
+
+    // Try multiple possible field names for ADR and occupancy
+    const adr =
+      data.avg_daily_rate != null ? Number(data.avg_daily_rate) :
+      data.adr != null ? Number(data.adr) :
+      data.averageDailyRate != null ? Number(data.averageDailyRate) :
+      null
+
+    const occupancy_rate =
+      data.occupancy_rate != null ? Number(data.occupancy_rate) :
+      data.occupancyRate != null ? Number(data.occupancyRate) :
+      data.occupancy != null ? Number(data.occupancy) :
+      null
+
+    return { adr, occupancy_rate }
+  } catch (err) {
+    console.warn('AirROI fetch failed (non-fatal):', err instanceof Error ? err.message : String(err))
     return { adr: null, occupancy_rate: null }
   }
 }
