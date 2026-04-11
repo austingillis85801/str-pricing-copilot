@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth'
 /**
  * GET /api/debug/airroi?lat=38.5153&lng=-109.4892
  *
- * Calls AirROI and returns the raw JSON response so we can identify field names.
+ * Probes multiple AirROI endpoint paths to find which ones return 200.
  * Session-guarded — only accessible when logged in.
  */
 export async function GET(request: Request) {
@@ -19,26 +19,83 @@ export async function GET(request: Request) {
   const lat = searchParams.get('lat') ?? '38.5153'
   const lng = searchParams.get('lng') ?? '-109.4892'
 
-  const url = `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`
+  const BASE = 'https://api.airroi.com'
+  const headers = { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
 
+  // Probe a list of candidate endpoints
+  const candidates = [
+    // GET endpoints with coords in query string
+    `${BASE}/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/markets/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/markets/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/market?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/markets?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/market/summary?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/markets/summary?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/markets/lookup?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+    `${BASE}/v1/market/lookup?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
+  ]
+
+  const results: Array<{
+    path: string
+    status: number
+    ok: boolean
+    top_level_keys: string[]
+    snippet: string
+  }> = []
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      })
+      const text = await res.text()
+      let parsed: Record<string, unknown> = {}
+      try { parsed = JSON.parse(text) } catch { /* not json */ }
+
+      results.push({
+        path: url.replace(apiKey, '***').replace(BASE, ''),
+        status: res.status,
+        ok: res.ok,
+        top_level_keys: Object.keys(parsed),
+        snippet: text.slice(0, 300),
+      })
+    } catch (err) {
+      results.push({
+        path: url.replace(apiKey, '***').replace(BASE, ''),
+        status: 0,
+        ok: false,
+        top_level_keys: [],
+        snippet: String(err),
+      })
+    }
+  }
+
+  // Also try POST /v1/markets/lookup with body
   try {
-    const res = await fetch(url, {
-      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(15_000),
+    const postUrl = `${BASE}/v1/markets/lookup`
+    const res = await fetch(postUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ lat: parseFloat(lat), lng: parseFloat(lng), radius: 10 }),
+      signal: AbortSignal.timeout(10_000),
     })
-
     const text = await res.text()
-    let parsed: unknown
-    try { parsed = JSON.parse(text) } catch { parsed = text }
-
-    return NextResponse.json({
+    let parsed: Record<string, unknown> = {}
+    try { parsed = JSON.parse(text) } catch { /* not json */ }
+    results.push({
+      path: 'POST /v1/markets/lookup (body: {lat,lng,radius})',
       status: res.status,
       ok: res.ok,
-      url_called: url.replace(apiKey, '***'),
-      raw_response: parsed,
-      top_level_keys: parsed && typeof parsed === 'object' ? Object.keys(parsed as object) : [],
+      top_level_keys: Object.keys(parsed),
+      snippet: text.slice(0, 300),
     })
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    results.push({ path: 'POST /v1/markets/lookup', status: 0, ok: false, top_level_keys: [], snippet: String(err) })
   }
+
+  const working = results.filter(r => r.ok)
+
+  return NextResponse.json({ working_endpoints: working, all_results: results })
 }
