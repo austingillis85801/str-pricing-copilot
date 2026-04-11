@@ -7,14 +7,12 @@ export const PROPERTY_COORDS: Record<string, { lat: number; lng: number; label: 
     lat: 38.5733,
     lng: -109.5498,
     label: 'Moab, UT',
-    // Airbnb search URL for Moab — entire homes, sorted by price
     airbnbSearchUrl: 'https://www.airbnb.com/s/Moab--UT--United-States/homes?adults=2&place_id=ChIJV2lfFqGZUIcR6e7cqvpJSFw&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
   },
   'bear-lake': {
     lat: 41.9377,
     lng: -111.343,
     label: 'Bear Lake, UT',
-    // Airbnb search URL for Garden City / Bear Lake area
     airbnbSearchUrl: 'https://www.airbnb.com/s/Garden-City--UT--United-States/homes?adults=2&refinement_paths%5B%5D=%2Fhomes&room_types%5B%5D=Entire+home%2Fapt',
   },
 }
@@ -38,7 +36,6 @@ export interface MarketSnapshot {
   percentile_25: number
   percentile_75: number
   sample_size: number
-  // AirROI market-level signals (null if fetch failed)
   market_occupancy_rate: number | null
   market_adr: number | null
   airroi_cached: boolean
@@ -52,23 +49,28 @@ export interface CompetitorData {
   market: MarketSnapshot
 }
 
-// Cache TTL: 24 hours in ms
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+// Cache TTL: 4 days in ms (matches cron schedule)
+const CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1000
 
-// ─── Apify — Live Airbnb competitor listings ──────────────────────────────────
+// ─── Apify — Async run pattern ───────────────────────────────────────────────
+// Instead of the sync endpoint (which takes 1-3 min and times out on Vercel
+// Hobby's 60s limit), we use the async pattern:
+//   1. startApifyRun() → kicks off actor, returns runId instantly (<2s)
+//   2. checkApifyRun() → polls run status (<1s per call)
+//   3. fetchApifyResults() → fetches dataset items when run is SUCCEEDED (<2s)
 
-async function fetchApifyCompetitors(
+const APIFY_ACTOR = 'dtrungtin~airbnb-scraper'
+
+/** Start an Apify actor run. Returns the run ID instantly. */
+export async function startApifyRun(
   airbnbSearchUrl: string,
   maxListings = 20
-): Promise<CompetitorListing[]> {
+): Promise<string> {
   const token = process.env.APIFY_TOKEN
   if (!token) throw new Error('APIFY_TOKEN not set')
 
-  // Apify Airbnb Scraper actor: dtrungtin/airbnb-scraper
-  // Use startUrls with a real Airbnb search URL — most reliable input method.
-  // run-sync-get-dataset-items waits for the run to finish and returns results directly.
-  const runRes = await fetch(
-    'https://api.apify.com/v2/acts/dtrungtin~airbnb-scraper/run-sync-get-dataset-items?token=' + token,
+  const res = await fetch(
+    `https://api.apify.com/v2/acts/${APIFY_ACTOR}/runs?token=${token}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -79,18 +81,67 @@ async function fetchApifyCompetitors(
         includeReviews: false,
         calendarMonths: 0,
       }),
-      signal: AbortSignal.timeout(270_000), // 270s max (routes have 300s budget)
+      signal: AbortSignal.timeout(15_000),
     }
   )
 
-  if (!runRes.ok) {
-    const body = await runRes.text()
-    throw new Error(`Apify run failed ${runRes.status}: ${body.slice(0, 200)}`)
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Apify start failed ${res.status}: ${body.slice(0, 300)}`)
   }
 
-  const items = await runRes.json() as Record<string, unknown>[]
+  const json = await res.json() as { data?: { id?: string } }
+  const runId = json.data?.id
+  if (!runId) throw new Error('Apify did not return a run ID')
+  return runId
+}
 
-  // Log first item to help debug field names (visible in Vercel function logs)
+/** Check the status of an Apify run. Returns status string. */
+export async function checkApifyRun(runId: string): Promise<{
+  status: 'READY' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'ABORTED' | 'TIMED-OUT'
+  datasetId: string | null
+}> {
+  const token = process.env.APIFY_TOKEN
+  if (!token) throw new Error('APIFY_TOKEN not set')
+
+  const res = await fetch(
+    `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`,
+    { signal: AbortSignal.timeout(10_000) }
+  )
+
+  if (!res.ok) {
+    throw new Error(`Apify status check failed ${res.status}`)
+  }
+
+  const json = await res.json() as {
+    data?: { status?: string; defaultDatasetId?: string }
+  }
+
+  return {
+    status: (json.data?.status ?? 'RUNNING') as 'READY' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'ABORTED' | 'TIMED-OUT',
+    datasetId: json.data?.defaultDatasetId ?? null,
+  }
+}
+
+/** Fetch results from a completed Apify run's dataset. */
+export async function fetchApifyResults(
+  datasetId: string,
+  maxListings = 20
+): Promise<CompetitorListing[]> {
+  const token = process.env.APIFY_TOKEN
+  if (!token) throw new Error('APIFY_TOKEN not set')
+
+  const res = await fetch(
+    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}&limit=${maxListings}`,
+    { signal: AbortSignal.timeout(15_000) }
+  )
+
+  if (!res.ok) {
+    throw new Error(`Apify dataset fetch failed ${res.status}`)
+  }
+
+  const items = await res.json() as Record<string, unknown>[]
+
   if (items.length > 0) {
     console.log('Apify sample item keys:', Object.keys(items[0]))
     console.log('Apify sample item:', JSON.stringify(items[0]).slice(0, 500))
@@ -98,28 +149,6 @@ async function fetchApifyCompetitors(
     console.warn('Apify returned 0 items')
   }
 
-  // Parse price from various formats Apify may return
-  function extractPrice(item: Record<string, unknown>): number {
-    // Try direct numeric price fields
-    for (const key of ['price', 'pricing.rate.amount', 'rate', 'basePrice', 'pricePerNight']) {
-      const val = item[key]
-      if (typeof val === 'number' && val > 0) return val
-    }
-    // Try nested pricing object
-    const pricing = item.pricing as Record<string, unknown> | undefined
-    if (pricing) {
-      const rate = pricing.rate as Record<string, unknown> | undefined
-      if (rate?.amount && typeof rate.amount === 'number') return rate.amount
-      if (pricing.price && typeof pricing.price === 'number') return pricing.price
-    }
-    // Try string price like "$185" or "185"
-    const priceStr = String(item.price ?? item.rate ?? '')
-    const parsed = parseFloat(priceStr.replace(/[^0-9.]/g, ''))
-    if (!isNaN(parsed) && parsed > 0) return parsed
-    return 0
-  }
-
-  // Normalize Apify response to our type
   return items
     .map((item) => {
       const price = extractPrice(item)
@@ -138,6 +167,24 @@ async function fetchApifyCompetitors(
     .slice(0, maxListings)
 }
 
+// Parse price from various formats Apify may return
+function extractPrice(item: Record<string, unknown>): number {
+  for (const key of ['price', 'pricing.rate.amount', 'rate', 'basePrice', 'pricePerNight']) {
+    const val = item[key]
+    if (typeof val === 'number' && val > 0) return val
+  }
+  const pricing = item.pricing as Record<string, unknown> | undefined
+  if (pricing) {
+    const rate = pricing.rate as Record<string, unknown> | undefined
+    if (rate?.amount && typeof rate.amount === 'number') return rate.amount
+    if (pricing.price && typeof pricing.price === 'number') return pricing.price
+  }
+  const priceStr = String(item.price ?? item.rate ?? '')
+  const parsed = parseFloat(priceStr.replace(/[^0-9.]/g, ''))
+  if (!isNaN(parsed) && parsed > 0) return parsed
+  return 0
+}
+
 // ─── AirROI — Market-level ADR + occupancy ────────────────────────────────────
 
 async function fetchAirROIMarket(
@@ -148,8 +195,6 @@ async function fetchAirROIMarket(
   if (!apiKey) return { adr: null, occupancy_rate: null }
 
   try {
-    // AirROI market data endpoint — coordinates-based lookup
-    // Docs require signing in; endpoint confirmed as /api/v1/market/data
     const res = await fetch(
       `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10`,
       {
@@ -168,16 +213,15 @@ async function fetchAirROIMarket(
       occupancy_rate: data.occupancy_rate != null ? Number(data.occupancy_rate) : null,
     }
   } catch {
-    // Non-fatal — AirROI enriches but isn't required
     return { adr: null, occupancy_rate: null }
   }
 }
 
 // ─── Market stats from listing prices ────────────────────────────────────────
 
-function buildMarketSnapshot(
+export function buildMarketSnapshot(
   listings: CompetitorListing[],
-  airroi: { adr: number | null; occupancy_rate: number | null }
+  airroi: { adr: number | null; occupancy_rate: number | null } = { adr: null, occupancy_rate: null }
 ): MarketSnapshot {
   const prices = listings.map((l) => l.price_per_night).sort((a, b) => a - b)
 
@@ -208,7 +252,7 @@ function buildMarketSnapshot(
 
 // ─── Supabase cache ───────────────────────────────────────────────────────────
 
-async function readCache(propertyId: string): Promise<CompetitorData | null> {
+export async function readCache(propertyId: string): Promise<CompetitorData | null> {
   try {
     const supabase = createServerSupabaseClient()
     const { data, error } = await supabase
@@ -224,7 +268,6 @@ async function readCache(propertyId: string): Promise<CompetitorData | null> {
     const age = Date.now() - new Date(data.fetched_at as string).getTime()
     if (age > CACHE_TTL_MS) return null // stale
 
-    // Don't serve cached empty results — force a fresh fetch
     const competitors = data.competitors as CompetitorListing[]
     if (!competitors || competitors.length === 0) return null
 
@@ -239,7 +282,7 @@ async function readCache(propertyId: string): Promise<CompetitorData | null> {
   }
 }
 
-async function writeCache(
+export async function writeCache(
   propertyId: string,
   slug: string,
   competitors: CompetitorListing[],
@@ -255,12 +298,11 @@ async function writeCache(
       fetched_at: new Date().toISOString(),
     })
   } catch {
-    // Non-fatal — table may not exist yet
     console.warn('Could not write to market_data table')
   }
 }
 
-// ─── Main export ──────────────────────────────────────────────────────────────
+// ─── Main export (cache-only for fast reads) ─────────────────────────────────
 
 export async function getMarketSnapshot(
   propertyId: string,
@@ -276,29 +318,20 @@ export async function getMarketSnapshot(
   const coords = PROPERTY_COORDS[slug]
   if (!coords) throw new Error(`Unknown property slug: ${slug}`)
 
-  // Fetch both sources in parallel (AirROI failure is non-fatal)
-  const [listings, airroi] = await Promise.all([
-    fetchApifyCompetitors(coords.airbnbSearchUrl),
-    fetchAirROIMarket(coords.lat, coords.lng),
-  ])
+  // Fetch AirROI (fast, non-fatal) — Apify is now handled via async start/poll
+  const airroi = await fetchAirROIMarket(coords.lat, coords.lng)
 
-  const market = buildMarketSnapshot(listings, airroi)
-
-  // Only cache if we actually got results — never cache empty data
-  if (listings.length > 0) {
-    await writeCache(propertyId, slug, listings, market)
+  // Return empty market snapshot if no cache — caller should use async flow
+  return {
+    property_id: propertyId,
+    slug,
+    competitors: [],
+    market: buildMarketSnapshot([], airroi),
   }
-
-  return { property_id: propertyId, slug, competitors: listings, market }
 }
 
 // ─── Competitor adjustment signal ─────────────────────────────────────────────
 
-/**
- * Given your recommended price and the market snapshot,
- * returns a signal: 'raise' | 'hold' | 'cut' | null
- * and a reason string.
- */
 export function getCompetitorAdjustment(
   yourPrice: number,
   market: MarketSnapshot,
@@ -309,7 +342,6 @@ export function getCompetitorAdjustment(
   const pctAboveMarket = ((yourPrice - market.avg_price) / market.avg_price) * 100
   const pctBelowMarket = -pctAboveMarket
 
-  // Within 7 days open AND you're the most expensive → cut urgently
   if (daysUntil <= 7 && pctAboveMarket > 10) {
     return {
       adjustment: 'cut',
@@ -317,7 +349,6 @@ export function getCompetitorAdjustment(
     }
   }
 
-  // Within 21 days AND significantly above market
   if (daysUntil <= 21 && pctAboveMarket > 20) {
     return {
       adjustment: 'cut',
@@ -325,7 +356,6 @@ export function getCompetitorAdjustment(
     }
   }
 
-  // Far out AND below market → raise opportunity
   if (daysUntil > 21 && pctBelowMarket > 10) {
     return {
       adjustment: 'raise',
@@ -333,7 +363,6 @@ export function getCompetitorAdjustment(
     }
   }
 
-  // Healthy range (within ±10% of market)
   if (Math.abs(pctAboveMarket) <= 10) {
     return { adjustment: 'hold', reason: 'Within 10% of market average — healthy position' }
   }

@@ -126,34 +126,106 @@ function ApifyBillingSection() {
 }
 
 // ─── Market Data Refresh Section ──────────────────────────────────────────────
+// Uses async start/poll pattern to avoid Vercel's 60s function timeout:
+//   1. POST /api/competitor-pricing/start → kicks off Apify runs, returns run IDs (~2s)
+//   2. GET /api/competitor-pricing/poll → checks status every 10s from the browser
+//   3. When all runs finish, results are cached in Supabase automatically
 
-interface RefreshResult {
-  property: string
+interface RunEntry {
+  propertyId: string
+  propertyName: string
+  slug: string
+  runId: string
+}
+
+interface PollResult {
+  runId: string
+  propertyId: string
+  slug: string
   status: string
   listings?: number
   error?: string
 }
 
 function MarketDataSection() {
-  const [refreshing, setRefreshing] = useState(false)
-  const [results, setResults] = useState<RefreshResult[] | null>(null)
+  const [phase, setPhase] = useState<'idle' | 'starting' | 'polling' | 'done' | 'error'>('idle')
+  const [runs, setRuns] = useState<RunEntry[]>([])
+  const [pollResults, setPollResults] = useState<PollResult[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [elapsed, setElapsed] = useState(0)
 
   async function handleRefresh() {
-    setRefreshing(true)
-    setResults(null)
+    setPhase('starting')
     setError(null)
+    setPollResults([])
+    setElapsed(0)
+
     try {
-      const res = await fetch('/api/competitor-pricing/refresh', { method: 'POST' })
-      const data = await res.json() as { success: boolean; results?: RefreshResult[]; error?: string }
-      if (!data.success) throw new Error(data.error ?? 'Refresh failed')
-      setResults(data.results ?? [])
+      // Step 1: Start Apify runs (returns instantly)
+      const startRes = await fetch('/api/competitor-pricing/start', { method: 'POST' })
+      if (!startRes.ok) {
+        const errData = await startRes.json().catch(() => ({ error: 'Start request failed' })) as { error?: string }
+        throw new Error(errData.error ?? `HTTP ${startRes.status}`)
+      }
+      const startData = await startRes.json() as {
+        success: boolean
+        runs: RunEntry[]
+        errors?: { propertyName: string; error: string }[]
+        error?: string
+      }
+      if (!startData.success) throw new Error(startData.error ?? 'Failed to start runs')
+      if (startData.runs.length === 0) throw new Error('No runs started')
+
+      setRuns(startData.runs)
+      setPhase('polling')
+
+      // Step 2: Poll every 10 seconds from the browser
+      const runsParam = startData.runs
+        .map((r) => `${r.runId}:${r.propertyId}:${r.slug}`)
+        .join(',')
+
+      const startTime = Date.now()
+      const maxPollTime = 5 * 60 * 1000 // 5 minutes max
+
+      const poll = async (): Promise<void> => {
+        const elapsedMs = Date.now() - startTime
+        setElapsed(Math.round(elapsedMs / 1000))
+
+        if (elapsedMs > maxPollTime) {
+          setPhase('error')
+          setError('Timed out after 5 minutes — Apify runs may still be completing. Try again in a few minutes.')
+          return
+        }
+
+        try {
+          const pollRes = await fetch(`/api/competitor-pricing/poll?runs=${encodeURIComponent(runsParam)}`)
+          if (!pollRes.ok) throw new Error(`Poll failed: HTTP ${pollRes.status}`)
+
+          const pollData = await pollRes.json() as { allDone: boolean; results: PollResult[] }
+          setPollResults(pollData.results)
+
+          if (pollData.allDone) {
+            setPhase('done')
+            return
+          }
+
+          // Still running — poll again in 10s
+          await new Promise((resolve) => setTimeout(resolve, 10_000))
+          return poll()
+        } catch (err) {
+          setPhase('error')
+          setError(err instanceof Error ? err.message : 'Polling failed')
+        }
+      }
+
+      await poll()
     } catch (err) {
+      setPhase('error')
       setError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setRefreshing(false)
     }
   }
+
+  const isActive = phase === 'starting' || phase === 'polling'
 
   return (
     <div className="bg-[#1e293b] rounded-2xl border border-slate-700/50 p-6">
@@ -167,16 +239,16 @@ function MarketDataSection() {
         </div>
         <button
           onClick={handleRefresh}
-          disabled={refreshing}
+          disabled={isActive}
           className="shrink-0 flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-700/50 text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
         >
-          {refreshing ? (
+          {isActive ? (
             <>
               <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              Fetching…
+              {phase === 'starting' ? 'Starting…' : `Polling… ${elapsed}s`}
             </>
           ) : (
             <>
@@ -189,41 +261,70 @@ function MarketDataSection() {
         </button>
       </div>
 
-      {refreshing && (
+      {/* Active polling status */}
+      {isActive && (
         <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg px-4 py-3 mb-4">
-          <p className="text-blue-300 text-sm font-medium">Fetching from Airbnb via Apify…</p>
-          <p className="text-blue-400/70 text-xs mt-0.5">
-            This scrapes live listings for both properties — takes 1–3 minutes. Please keep this tab open.
+          <p className="text-blue-300 text-sm font-medium">
+            {phase === 'starting'
+              ? 'Starting Apify scraper runs…'
+              : `Waiting for Apify to finish scraping… (${elapsed}s)`}
           </p>
+          <p className="text-blue-400/70 text-xs mt-0.5">
+            Apify is scraping live Airbnb listings for {runs.length} propert{runs.length === 1 ? 'y' : 'ies'}.
+            This typically takes 1–3 minutes. Keep this tab open.
+          </p>
+          {/* Per-run status during polling */}
+          {pollResults.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              {pollResults.map((r) => (
+                <div key={r.runId} className="flex items-center gap-2">
+                  {r.status === 'RUNNING' || r.status === 'READY' ? (
+                    <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+                  ) : r.status === 'SUCCEEDED' ? (
+                    <span className="w-2 h-2 bg-emerald-400 rounded-full" />
+                  ) : (
+                    <span className="w-2 h-2 bg-red-400 rounded-full" />
+                  )}
+                  <span className="text-xs text-slate-300">
+                    {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
+                    {' — '}
+                    {r.status === 'SUCCEEDED' ? `Done (${r.listings} listings)` : r.status === 'RUNNING' || r.status === 'READY' ? 'Running…' : r.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {results && (
+      {/* Final results */}
+      {phase === 'done' && pollResults.length > 0 && (
         <div className="space-y-2 mb-4">
-          {results.map((r) => (
+          {pollResults.map((r) => (
             <div
-              key={r.property}
+              key={r.runId}
               className={`flex items-center justify-between rounded-lg px-4 py-3 border ${
-                r.status === 'refreshed'
+                r.status === 'SUCCEEDED'
                   ? 'bg-emerald-900/20 border-emerald-600/40'
                   : 'bg-red-900/20 border-red-500/40'
               }`}
             >
               <div>
-                <p className={`text-sm font-medium ${r.status === 'refreshed' ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {r.property}
+                <p className={`text-sm font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {runs.find((run) => run.runId === r.runId)?.propertyName ?? r.slug}
                 </p>
                 {r.error && <p className="text-xs text-red-400/80 mt-0.5">{r.error}</p>}
               </div>
-              <span className={`text-xs font-medium ${r.status === 'refreshed' ? 'text-emerald-400' : 'text-red-400'}`}>
-                {r.status === 'refreshed' ? `✓ ${r.listings ?? 0} listings` : 'Failed'}
+              <span className={`text-xs font-medium ${r.status === 'SUCCEEDED' ? 'text-emerald-400' : 'text-red-400'}`}>
+                {r.status === 'SUCCEEDED' ? `${r.listings ?? 0} listings` : 'Failed'}
               </span>
             </div>
           ))}
         </div>
       )}
 
-      {error && (
+      {/* Error */}
+      {phase === 'error' && error && (
         <div className="bg-red-900/20 border border-red-500/40 rounded-lg px-4 py-3 mb-4">
           <p className="text-red-300 text-sm">{error}</p>
         </div>
