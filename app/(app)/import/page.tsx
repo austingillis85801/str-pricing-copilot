@@ -20,12 +20,38 @@ interface SectionState {
 // Lightweight client-side CSV listing detector
 // ─────────────────────────────────────────────
 
+/** Proper quoted-CSV line parser — handles commas inside quoted fields */
+function parseCsvLine(line: string): string[] {
+  const result: string[] = []
+  let current = ''
+  let inQuotes = false
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"'
+        i++
+      } else {
+        inQuotes = !inQuotes
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current)
+      current = ''
+    } else {
+      current += char
+    }
+  }
+  result.push(current)
+  return result
+}
+
 function extractListingNames(csvText: string): string[] {
   const lines = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
   if (lines.length < 2) return []
 
-  // Find the "Listing" header index
-  const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase())
+  // Find the "Listing" header index using proper CSV parsing
+  const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase())
   const listingIdx = headers.indexOf('listing')
   if (listingIdx === -1) return []
 
@@ -33,9 +59,8 @@ function extractListingNames(csvText: string): string[] {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim()
     if (!line) continue
-    // Simple split — good enough for detecting listing names
-    const cols = line.split(',').map(c => c.replace(/^"|"$/g, '').trim())
-    const name = cols[listingIdx]
+    const cols = parseCsvLine(line)
+    const name = cols[listingIdx]?.trim()
     if (name) names.add(name)
   }
   return Array.from(names).sort()
