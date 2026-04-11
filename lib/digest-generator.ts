@@ -135,12 +135,21 @@ export async function generateWeeklyDigest(): Promise<{ subject: string; html: s
     messages: [{ role: 'user', content: JSON.stringify(combinedContext) }],
   })
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : ''
+  const raw = response.content[0].type === 'text' ? response.content[0].text : ''
+
+  // Claude sometimes wraps JSON in markdown fences (```json ... ```) despite instructions.
+  // Strip them before parsing.
+  const text = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim()
 
   let digestData: DigestData
   try {
     digestData = JSON.parse(text)
   } catch {
+    console.error('Claude digest raw output:', raw.slice(0, 500))
     throw new Error('Claude returned invalid JSON for digest')
   }
 

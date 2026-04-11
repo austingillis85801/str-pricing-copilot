@@ -311,11 +311,13 @@ export async function fetchAirROIMarket(
   }
 
   try {
+    // AirROI does not use Bearer auth — send key as query param.
+    // Also include X-Api-Key header as a secondary attempt in case they switch formats.
     const res = await fetch(
-      `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10`,
+      `https://api.airroi.com/v1/market/data?lat=${lat}&lng=${lng}&radius=10&api_key=${encodeURIComponent(apiKey)}`,
       {
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          'X-Api-Key': apiKey,
           'Content-Type': 'application/json',
         },
         signal: AbortSignal.timeout(15_000),
