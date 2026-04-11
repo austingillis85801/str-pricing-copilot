@@ -414,29 +414,30 @@ export async function fetchAirROIMarket(
   }
 
   try {
-    // ── Step 1: Find the market at these coordinates ─────────────────────────
-    const searchRes = await fetch(
-      `${AIRROI_BASE}/markets/search?latitude=${lat}&longitude=${lng}`,
+    // ── Step 1: Look up the market at these coordinates ─────────────────────
+    // /markets/lookup?lat=&lng= returns {country, region, locality, district} — confirmed working.
+    const lookupRes = await fetch(
+      `${AIRROI_BASE}/markets/lookup?lat=${lat}&lng=${lng}`,
       { headers, signal: AbortSignal.timeout(15_000) }
     )
 
-    if (!searchRes.ok) {
-      const body = await searchRes.text().catch(() => '')
-      console.warn(`AirROI /markets/search error ${searchRes.status}: ${body}`)
+    if (!lookupRes.ok) {
+      const body = await lookupRes.text().catch(() => '')
+      console.warn(`AirROI /markets/lookup error ${lookupRes.status}: ${body}`)
       return { adr: null, occupancy_rate: null }
     }
 
-    const searchData = await searchRes.json() as Record<string, unknown>
-    console.log('AirROI market search raw:', JSON.stringify(searchData).slice(0, 400))
+    const lookupData = await lookupRes.json() as Record<string, unknown>
+    console.log('AirROI market lookup raw:', JSON.stringify(lookupData).slice(0, 400))
 
     // Unwrap .data wrapper if present
-    const mkt = (searchData.data ?? searchData) as Record<string, unknown>
+    const mkt = (lookupData.data ?? lookupData) as Record<string, unknown>
     const { country, region, locality, district } = mkt as {
       country?: string; region?: string; locality?: string; district?: string | null
     }
 
     if (!country || !region || !locality) {
-      console.warn('AirROI: missing market fields', JSON.stringify(searchData).slice(0, 200))
+      console.warn('AirROI: missing market fields', JSON.stringify(lookupData).slice(0, 200))
       return { adr: null, occupancy_rate: null }
     }
 

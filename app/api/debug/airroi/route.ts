@@ -24,12 +24,12 @@ export async function GET(request: Request) {
   const BASE = 'https://api.airroi.com'
   const headers = { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }
 
-  // Step 1: /markets/search with coordinates
+  // Step 1: /markets/lookup with lat/lng (confirmed working — returns country/region/locality)
   let marketData: Record<string, unknown> = {}
   let step1Status = 0
 
   try {
-    const r = await fetch(`${BASE}/markets/search?latitude=${lat}&longitude=${lng}`, {
+    const r = await fetch(`${BASE}/markets/lookup?lat=${lat}&lng=${lng}`, {
       headers, signal: AbortSignal.timeout(12_000),
     })
     step1Status = r.status
