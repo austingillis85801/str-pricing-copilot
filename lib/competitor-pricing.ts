@@ -79,7 +79,7 @@ async function fetchApifyCompetitors(
         includeReviews: false,
         calendarMonths: 0,
       }),
-      signal: AbortSignal.timeout(55_000), // 55s max (route has 60s budget)
+      signal: AbortSignal.timeout(270_000), // 270s max (routes have 300s budget)
     }
   )
 

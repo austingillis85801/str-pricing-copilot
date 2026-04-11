@@ -3,8 +3,8 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { getMarketSnapshot } from '@/lib/competitor-pricing'
 
-// Apify can take 30–50s for a full scrape run
-export const maxDuration = 60
+// Apify can take 60–120s per property — bumped to match manual refresh route
+export const maxDuration = 300
 
 export async function GET(request: Request) {
   const session = await getServerSession(authOptions)

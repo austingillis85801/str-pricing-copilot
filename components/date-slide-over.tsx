@@ -316,13 +316,7 @@ export function DateSlideOver({ selected, rulesOutput, propertyId, slug, onClose
                 <h4 className="text-slate-400 text-xs font-medium uppercase tracking-wide">
                   Competitor Pricing
                 </h4>
-                <button
-                  onClick={() => fetchCompetitors(true)}
-                  disabled={competitorLoading}
-                  className="text-xs text-blue-400 hover:text-blue-300 disabled:text-slate-500 transition-colors"
-                >
-                  {competitorLoading ? 'Refreshing…' : '↻ Refresh'}
-                </button>
+                {/* Cache-only read — live refresh is in Settings to avoid timeouts */}
               </div>
 
               {competitorLoading && !competitorData && (
@@ -333,11 +327,11 @@ export function DateSlideOver({ selected, rulesOutput, propertyId, slug, onClose
                 </div>
               )}
 
-              {competitorError && !competitorData && (
-                <div className="bg-red-900/20 border border-red-500/30 rounded-lg p-3">
-                  <p className="text-red-400 text-xs">{competitorError}</p>
+              {(competitorError || (!competitorLoading && !competitorData)) && (
+                <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-3">
+                  <p className="text-slate-400 text-xs font-medium">No market data cached yet</p>
                   <p className="text-slate-500 text-xs mt-1">
-                    Make sure APIFY_TOKEN is set in your environment variables.
+                    Go to <span className="text-blue-400">Settings → Refresh Market Data</span> to fetch live competitor prices. Data auto-refreshes every 4 days.
                   </p>
                 </div>
               )}

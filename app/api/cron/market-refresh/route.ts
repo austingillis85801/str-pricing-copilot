@@ -2,8 +2,8 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { getMarketSnapshot } from '@/lib/competitor-pricing'
 import type { Property } from '@/lib/types'
 
-// Apify runs for both properties + AirROI calls
-export const maxDuration = 60
+// Apify runs for both properties sequentially — can take 2–3 minutes total
+export const maxDuration = 300
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization')
