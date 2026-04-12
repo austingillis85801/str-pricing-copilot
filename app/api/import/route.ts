@@ -55,7 +55,7 @@ function parseCsvLine(line: string): string[] {
 
 function parseDate(raw: string): string | null {
   if (!raw) return null
-  // Try ISO first
+  // Try ISO first (2025-03-05)
   try {
     const d = parseISO(raw)
     if (isValid(d)) return d.toISOString().split('T')[0]
@@ -63,6 +63,17 @@ function parseDate(raw: string): string | null {
   // Try MM/DD/YYYY
   const mdy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
   if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`
+  // Try "Month D, YYYY" (e.g. "March 5, 2025") — Vrbo format
+  const months: Record<string, string> = {
+    january: '01', february: '02', march: '03', april: '04',
+    may: '05', june: '06', july: '07', august: '08',
+    september: '09', october: '10', november: '11', december: '12',
+  }
+  const longForm = raw.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/)
+  if (longForm) {
+    const m = months[longForm[1].toLowerCase()]
+    if (m) return `${longForm[3]}-${m}-${longForm[2].padStart(2, '0')}`
+  }
   return null
 }
 
@@ -160,7 +171,7 @@ function parseVrboCsv(rows: Record<string, string>[]): ParsedBooking[] {
     const status = findColumn(row, ['Status', 'status', 'Booking status', 'booking status'])
     if (status.toLowerCase().includes('cancel')) continue
 
-    const external_booking_id = findColumn(row, ['Confirmation number', 'confirmation number', 'Confirmation Number', 'Booking ID', 'booking id'])
+    const external_booking_id = findColumn(row, ['Confirmation number', 'confirmation number', 'Confirmation Number', 'Reservation ID', 'reservation id', 'Booking ID', 'booking id'])
     if (!external_booking_id) continue
 
     const checkInRaw = findColumn(row, ['Check-in', 'check-in', 'Check In', 'check in', 'Arrival', 'arrival'])
@@ -177,7 +188,7 @@ function parseVrboCsv(rows: Record<string, string>[]): ParsedBooking[] {
     if (nights <= 0) continue
 
     const total_revenue = parseMoney(
-      findColumn(row, ['Gross earnings', 'gross earnings', 'Gross Earnings', 'Total', 'total', 'Amount', 'amount', 'Payout', 'payout'])
+      findColumn(row, ['Gross earnings', 'gross earnings', 'Gross Earnings', 'Gross booking amount', 'gross booking amount', 'Total', 'total', 'Amount', 'amount', 'Payout', 'payout'])
     )
 
     const bookingDateRaw = findColumn(row, ['Booking date', 'booking date', 'Booking Date', 'Booked', 'booked', 'Created', 'created'])
