@@ -27,7 +27,6 @@ export interface Booking {
   nights: number
   total_revenue: number
   nightly_rate: number | null
-  lead_time: number | null
   status: BookingStatus
   created_at: string
   updated_at: string

@@ -355,7 +355,6 @@ export async function POST(req: Request) {
       nights: booking.nights,
       total_revenue: booking.total_revenue,
       nightly_rate: booking.nightly_rate,
-      lead_time: booking.lead_time,
       status: 'active',
       updated_at: new Date().toISOString(),
     }
