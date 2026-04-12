@@ -119,7 +119,10 @@ function ImportSection({
         <div className="shrink-0">
           <select
             value={state.platform}
-            onChange={e => onChange({ platform: e.target.value as ImportPlatform, file: null, detectedListings: [], selectedListing: '', result: null, error: null, confirmClear: false })}
+            onChange={e => {
+              if (fileRef.current) fileRef.current.value = ''
+              onChange({ platform: e.target.value as ImportPlatform, file: null, detectedListings: [], selectedListing: '', result: null, error: null, confirmClear: false })
+            }}
             className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           >
             <option value="airbnb">Airbnb CSV</option>
@@ -155,7 +158,12 @@ function ImportSection({
           type="file"
           accept=".csv"
           className="hidden"
-          onChange={e => handleFileChange(e.target.files?.[0] ?? null)}
+          onChange={e => {
+              const f = e.target.files?.[0] ?? null
+              // Reset so the same file can be re-selected after clearing
+              e.target.value = ''
+              handleFileChange(f)
+            }}
         />
         {state.file ? (
           <div className="flex items-center justify-center gap-2">
@@ -165,7 +173,11 @@ function ImportSection({
             <span className="text-blue-400 text-sm font-medium">{state.file.name}</span>
             <button
               type="button"
-              onClick={e => { e.stopPropagation(); onChange({ file: null, detectedListings: [], selectedListing: '', result: null, error: null }) }}
+              onClick={e => {
+                e.stopPropagation()
+                if (fileRef.current) fileRef.current.value = ''
+                onChange({ file: null, detectedListings: [], selectedListing: '', result: null, error: null })
+              }}
               className="text-slate-500 hover:text-slate-300 ml-1"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
