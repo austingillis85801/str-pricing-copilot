@@ -334,9 +334,10 @@ export async function POST(req: Request) {
   // ── Upsert bookings ─────────────────────────
   let newBookings = 0
   let updatedBookings = 0
+  const dbErrors: string[] = []
 
   for (const booking of parsed) {
-    // Check if booking already exists
+    // Check if booking already exists for this property+platform
     const { data: existing } = await supabase
       .from('bookings')
       .select('id')
@@ -360,12 +361,27 @@ export async function POST(req: Request) {
     }
 
     if (existing) {
-      await supabase.from('bookings').update(record).eq('id', existing.id)
-      updatedBookings++
+      const { error: updateErr } = await supabase
+        .from('bookings')
+        .update(record)
+        .eq('id', existing.id)
+      if (updateErr) dbErrors.push(`Update ${booking.external_booking_id}: ${updateErr.message}`)
+      else updatedBookings++
     } else {
-      await supabase.from('bookings').insert({ ...record, created_at: new Date().toISOString() })
-      newBookings++
+      const { error: insertErr } = await supabase
+        .from('bookings')
+        .insert({ ...record, created_at: new Date().toISOString() })
+      if (insertErr) dbErrors.push(`Insert ${booking.external_booking_id}: ${insertErr.message}`)
+      else newBookings++
     }
+  }
+
+  // If every single booking failed to save, return an error with the first message
+  if (dbErrors.length > 0 && newBookings === 0 && updatedBookings === 0) {
+    return NextResponse.json(
+      { error: `All bookings failed to save. First error: ${dbErrors[0]}` },
+      { status: 500 }
+    )
   }
 
   // ── Log the import ──────────────────────────
@@ -386,6 +402,7 @@ export async function POST(req: Request) {
     cancelledBookings,
     propertyName: property.name,
     platform: platform.charAt(0).toUpperCase() + platform.slice(1),
+    dbErrors: dbErrors.length > 0 ? dbErrors : undefined,
   }
 
   return NextResponse.json(result)

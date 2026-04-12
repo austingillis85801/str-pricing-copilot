@@ -51,6 +51,7 @@ export interface ImportResult {
   cancelledBookings: number
   propertyName: string
   platform: string
+  dbErrors?: string[]
 }
 
 export interface PropertyFormData {

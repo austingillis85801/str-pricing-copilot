@@ -230,6 +230,19 @@ function ImportSection({
               {state.result.cancelledBookings} booking{state.result.cancelledBookings !== 1 ? 's' : ''} marked as cancelled
             </li>
           </ul>
+          {state.result.dbErrors && state.result.dbErrors.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-emerald-500/20">
+              <p className="text-yellow-400 text-xs font-medium mb-1">{state.result.dbErrors.length} booking{state.result.dbErrors.length !== 1 ? 's' : ''} failed to save:</p>
+              <ul className="space-y-0.5">
+                {state.result.dbErrors.slice(0, 3).map((e, i) => (
+                  <li key={i} className="text-yellow-300/70 text-xs font-mono truncate">{e}</li>
+                ))}
+                {state.result.dbErrors.length > 3 && (
+                  <li className="text-slate-500 text-xs">…and {state.result.dbErrors.length - 3} more</li>
+                )}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
