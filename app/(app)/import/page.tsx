@@ -12,6 +12,8 @@ interface SectionState {
   detectedListings: string[]   // listing names found in the CSV (Airbnb only)
   selectedListing: string      // '' = import all, otherwise the chosen listing name
   loading: boolean
+  clearing: boolean            // true while DELETE is in flight
+  confirmClear: boolean        // true when showing the confirmation prompt
   result: ImportResult | null
   error: string | null
 }
@@ -75,11 +77,13 @@ function ImportSection({
   state,
   onChange,
   onImport,
+  onClear,
 }: {
   property: Property
   state: SectionState
   onChange: (updated: Partial<SectionState>) => void
   onImport: () => void
+  onClear: () => void
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -229,28 +233,61 @@ function ImportSection({
         </div>
       )}
 
-      <button
-        onClick={onImport}
-        disabled={!state.file || state.loading || (showListingPicker && !state.selectedListing)}
-        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium rounded-lg px-4 py-2.5 text-sm transition-colors duration-150"
-      >
-        {state.loading ? (
-          <>
-            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-            Importing...
-          </>
-        ) : (
-          <>
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={onImport}
+          disabled={!state.file || state.loading || (showListingPicker && !state.selectedListing)}
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium rounded-lg px-4 py-2.5 text-sm transition-colors duration-150"
+        >
+          {state.loading ? (
+            <>
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Importing...
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              Import
+            </>
+          )}
+        </button>
+
+        {/* Clear bookings */}
+        {!state.confirmClear ? (
+          <button
+            onClick={() => onChange({ confirmClear: true })}
+            disabled={state.loading || state.clearing}
+            className="flex items-center gap-2 text-slate-400 hover:text-red-400 disabled:opacity-40 text-sm font-medium transition-colors duration-150"
+          >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
             </svg>
-            Import
-          </>
+            Clear bookings
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+            <span className="text-red-400 text-xs">Delete all {state.platform} bookings for this property?</span>
+            <button
+              onClick={onClear}
+              disabled={state.clearing}
+              className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50 underline"
+            >
+              {state.clearing ? 'Deleting…' : 'Yes, delete'}
+            </button>
+            <button
+              onClick={() => onChange({ confirmClear: false })}
+              className="text-xs text-slate-500 hover:text-slate-300"
+            >
+              Cancel
+            </button>
+          </div>
         )}
-      </button>
+      </div>
     </div>
   )
 }
@@ -279,6 +316,8 @@ export default function ImportPage() {
             detectedListings: [],
             selectedListing: '',
             loading: false,
+            clearing: false,
+            confirmClear: false,
             result: null,
             error: null,
           }
@@ -329,6 +368,28 @@ export default function ImportPage() {
     }
   }
 
+  const handleClear = async (property: Property) => {
+    const section = sections[property.id]
+    if (!section) return
+
+    updateSection(property.id, { clearing: true, error: null, result: null })
+
+    try {
+      const res = await fetch(
+        `/api/import?propertyId=${encodeURIComponent(property.id)}&platform=${encodeURIComponent(section.platform)}`,
+        { method: 'DELETE' }
+      )
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Delete failed')
+      updateSection(property.id, { clearing: false, confirmClear: false })
+      showToast(`Cleared ${data.deleted} bookings from ${property.name}`, 'success')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Delete failed'
+      updateSection(property.id, { clearing: false, confirmClear: false, error: msg })
+      showToast(msg, 'error')
+    }
+  }
+
   if (loading) {
     return (
       <div className="p-6 md:p-8 flex items-center justify-center min-h-[60vh]">
@@ -366,11 +427,14 @@ export default function ImportPage() {
                 detectedListings: [],
                 selectedListing: '',
                 loading: false,
+                clearing: false,
+                confirmClear: false,
                 result: null,
                 error: null,
               }}
               onChange={update => updateSection(property.id, update)}
               onImport={() => handleImport(property)}
+              onClear={() => handleClear(property)}
             />
           ))}
         </div>

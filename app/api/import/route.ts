@@ -225,6 +225,46 @@ export async function GET() {
 }
 
 // ─────────────────────────────────────────────
+// DELETE — clear all bookings for a property + platform
+// ─────────────────────────────────────────────
+
+export async function DELETE(req: Request) {
+  const session = await getServerSession(authOptions)
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { searchParams } = new URL(req.url)
+  const propertyId = searchParams.get('propertyId')
+  const platform = searchParams.get('platform')
+
+  if (!propertyId || !platform) {
+    return NextResponse.json({ error: 'Missing propertyId or platform' }, { status: 400 })
+  }
+
+  const supabase = createServerSupabaseClient()
+
+  // Verify property exists
+  const { data: property, error: propError } = await supabase
+    .from('properties')
+    .select('id, name')
+    .eq('id', propertyId)
+    .single()
+
+  if (propError || !property) {
+    return NextResponse.json({ error: 'Property not found' }, { status: 404 })
+  }
+
+  const { error, count } = await supabase
+    .from('bookings')
+    .delete({ count: 'exact' })
+    .eq('property_id', propertyId)
+    .eq('platform', platform)
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  return NextResponse.json({ deleted: count ?? 0, propertyName: property.name })
+}
+
+// ─────────────────────────────────────────────
 // POST — process CSV upload
 // ─────────────────────────────────────────────
 
