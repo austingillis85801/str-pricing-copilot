@@ -164,12 +164,18 @@ function parseAirbnbCsv(rows: Record<string, string>[], listingFilter?: string):
   return results
 }
 
-function parseVrboCsv(rows: Record<string, string>[]): ParsedBooking[] {
+function parseVrboCsv(rows: Record<string, string>[], addressFilter?: string): ParsedBooking[] {
   const results: ParsedBooking[] = []
 
   for (const row of rows) {
     const status = findColumn(row, ['Status', 'status', 'Booking status', 'booking status'])
     if (status.toLowerCase().includes('cancel')) continue
+
+    // If an address filter is provided, only import rows matching that address
+    if (addressFilter) {
+      const address = findColumn(row, ['Address', 'address'])
+      if (address !== addressFilter) continue
+    }
 
     const external_booking_id = findColumn(row, ['Confirmation number', 'confirmation number', 'Confirmation Number', 'Reservation ID', 'reservation id', 'Booking ID', 'booking id'])
     if (!external_booking_id) continue
@@ -300,7 +306,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'CSV file is empty or could not be parsed' }, { status: 400 })
   }
 
-  const parsed = platform === 'airbnb' ? parseAirbnbCsv(rows, listingName) : parseVrboCsv(rows)
+  const parsed = platform === 'airbnb' ? parseAirbnbCsv(rows, listingName) : parseVrboCsv(rows, listingName)
 
   if (parsed.length === 0) {
     return NextResponse.json({ error: 'No valid bookings found in the CSV. Check that the file format matches the expected export.' }, { status: 400 })

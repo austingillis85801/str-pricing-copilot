@@ -85,11 +85,12 @@ function getCellStyle(sel: SelectedDate): {
   text: string
   border: string
 } {
-  if (sel.isDead) {
-    return { bg: 'bg-slate-900/80', text: 'text-slate-600', border: '' }
-  }
+  // Booked takes priority over dead zone — a booking in low season should still show green
   if (sel.isBooked) {
     return { bg: 'bg-emerald-900/60', text: 'text-emerald-300', border: '' }
+  }
+  if (sel.isDead) {
+    return { bg: 'bg-slate-900/80', text: 'text-slate-600', border: '' }
   }
   if (sel.openDate?.alert_level === 'action' || sel.entry?.alert_level === 'action') {
     return { bg: 'bg-red-900/50', text: 'text-red-300', border: 'border-red-500/50' }
