@@ -9,6 +9,7 @@ interface PropertyCompetitorData {
   property_name: string
   slug: string
   competitors: CompetitorListing[]
+  excludedIds: string[]
   market: MarketSnapshot | null
   fetched_at: string | null
 }
@@ -57,15 +58,51 @@ function StatCell({ label, value, sub }: { label: string; value: React.ReactNode
   )
 }
 
-function ListingCard({ c, index }: { c: CompetitorListing; index: number }) {
+function ListingCard({
+  c,
+  index,
+  excluded,
+  propertyId,
+  onToggleExclusion,
+}: {
+  c: CompetitorListing
+  index: number
+  excluded: boolean
+  propertyId: string
+  onToggleExclusion: (listingId: string, exclude: boolean) => void
+}) {
   const [open, setOpen] = useState(false)
+  const [toggling, setToggling] = useState(false)
 
   const hasAirROIData = c.platform === 'airroi'
   const hasAnyFees = c.cleaning_fee != null || c.extra_guest_fee != null
   const hasPerf = c.ttm_revenue != null || c.ttm_occupancy != null
 
+  async function handleToggle(e: React.MouseEvent) {
+    e.stopPropagation()
+    setToggling(true)
+    try {
+      if (excluded) {
+        await fetch(`/api/competitor-exclusions?property_id=${propertyId}&listing_id=${encodeURIComponent(c.listing_id)}`, { method: 'DELETE' })
+      } else {
+        await fetch('/api/competitor-exclusions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ property_id: propertyId, listing_id: c.listing_id }),
+        })
+      }
+      onToggleExclusion(c.listing_id, !excluded)
+    } finally {
+      setToggling(false)
+    }
+  }
+
   return (
-    <div className="border border-slate-700/40 rounded-xl overflow-hidden bg-slate-800/30">
+    <div className={`border rounded-xl overflow-hidden transition-opacity ${
+      excluded
+        ? 'border-slate-700/20 bg-slate-900/40 opacity-60'
+        : 'border-slate-700/40 bg-slate-800/30'
+    }`}>
       {/* ── Main row ── */}
       <button
         type="button"
@@ -77,9 +114,14 @@ function ListingCard({ c, index }: { c: CompetitorListing; index: number }) {
 
         {/* Name */}
         <div className="flex-1 min-w-0">
-          <p className="text-slate-200 text-sm font-medium leading-snug truncate" title={c.name}>
-            {c.name || 'Listing'}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className={`text-sm font-medium leading-snug truncate ${excluded ? 'text-slate-500 line-through' : 'text-slate-200'}`} title={c.name}>
+              {c.name || 'Listing'}
+            </p>
+            {excluded && (
+              <span className="shrink-0 text-xs text-slate-500 italic">excluded from calcs</span>
+            )}
+          </div>
           <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
             <SourceBadge platform={c.platform} />
             <TypeBadge type={c.property_type} />
@@ -123,6 +165,31 @@ function ListingCard({ c, index }: { c: CompetitorListing; index: number }) {
           <p className="text-sm font-bold text-white">{fmtD(c.price_per_night)}</p>
           {c.rating != null && <p className="text-xs text-amber-400">★ {c.rating.toFixed(1)}</p>}
         </div>
+
+        {/* Exclude toggle */}
+        <button
+          type="button"
+          onClick={handleToggle}
+          disabled={toggling}
+          title={excluded ? 'Re-include in calculations' : 'Exclude from calculations'}
+          className={`shrink-0 p-1.5 rounded-lg transition-colors disabled:opacity-50 ${
+            excluded
+              ? 'text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10'
+              : 'text-slate-500 hover:text-red-400 hover:bg-red-500/10'
+          }`}
+        >
+          {excluded ? (
+            // Re-include icon (plus circle)
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          ) : (
+            // Exclude icon (minus circle)
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          )}
+        </button>
 
         {/* Expand arrow */}
         {hasAirROIData && (
@@ -211,6 +278,17 @@ export default function CompetitorsPage() {
   const [activeSlug, setActiveSlug] = useState<string | null>(null)
   const [sortKey, setSortKey] = useState<SortKey>('price_per_night')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  // Local exclusion state so toggling is instant without a full reload
+  const [localExclusions, setLocalExclusions] = useState<Record<string, Set<string>>>({})
+
+  function handleToggleExclusion(propertyId: string, listingId: string, nowExcluded: boolean) {
+    setLocalExclusions(prev => {
+      const set = new Set(prev[propertyId] ?? [])
+      if (nowExcluded) set.add(listingId)
+      else set.delete(listingId)
+      return { ...prev, [propertyId]: set }
+    })
+  }
 
   const load = useCallback(() => {
     setLoading(true)
@@ -219,6 +297,10 @@ export default function CompetitorsPage() {
       .then((d: PropertyCompetitorData[]) => {
         setData(d)
         if (d.length > 0 && !activeSlug) setActiveSlug(d[0].slug)
+        // Seed local exclusion state from server
+        const seed: Record<string, Set<string>> = {}
+        for (const prop of d) seed[prop.property_id] = new Set(prop.excludedIds ?? [])
+        setLocalExclusions(seed)
       })
       .catch(console.error)
       .finally(() => setLoading(false))
@@ -408,11 +490,29 @@ export default function CompetitorsPage() {
 
           {/* Listings */}
           <div className="space-y-2">
-            {sorted.map((c, i) => <ListingCard key={c.listing_id || i} c={c} index={i} />)}
+            {sorted.map((c, i) => (
+              <ListingCard
+                key={c.listing_id || i}
+                c={c}
+                index={i}
+                excluded={localExclusions[activeData!.property_id]?.has(c.listing_id) ?? false}
+                propertyId={activeData!.property_id}
+                onToggleExclusion={(listingId, nowExcluded) =>
+                  handleToggleExclusion(activeData!.property_id, listingId, nowExcluded)
+                }
+              />
+            ))}
           </div>
 
           <div className="mt-4 flex items-center justify-between text-xs text-slate-600">
-            <p>{sorted.length} comparable listings · click to expand details</p>
+            <p>
+              {sorted.length} comparable listings · click to expand details
+              {(localExclusions[activeData!.property_id]?.size ?? 0) > 0 && (
+                <span className="ml-2 text-slate-500">
+                  · {localExclusions[activeData!.property_id].size} excluded from market calculations
+                </span>
+              )}
+            </p>
             {activeData?.fetched_at && (
               <p>{format(new Date(activeData.fetched_at), 'MMM d, yyyy h:mm a')}</p>
             )}
