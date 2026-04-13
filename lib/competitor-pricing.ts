@@ -618,7 +618,10 @@ export async function fetchAirROIComparables(
           property_type:      String(info?.listing_type ?? info?.room_type ?? '') || null,
           distance_miles:     distanceMiles,
           platform:           'airroi',
-          url:                id ? `https://www.airbnb.com/rooms/${id}` : null,
+          // AirROI IDs are their internal database IDs, not Airbnb listing IDs.
+          // Constructing airbnb.com/rooms/{airroi_id} produces broken 404 links.
+          // Only Apify-sourced listings have real Airbnb URLs.
+          url:                null,
           // Fees
           cleaning_fee:       n(pricing?.cleaning_fee),
           extra_guest_fee:    n(pricing?.extra_guest_fee),
