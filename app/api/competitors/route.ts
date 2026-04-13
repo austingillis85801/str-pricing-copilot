@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import type { Property } from '@/lib/types'
-import { buildMarketSnapshot, type CompetitorListing, type MarketSnapshot, type AirROIMarketData } from '@/lib/competitor-pricing'
+import { buildMarketSnapshot, type CompetitorListing, type MarketSnapshot } from '@/lib/competitor-pricing'
 
 export interface PropertyCompetitorData {
   property_id: string
