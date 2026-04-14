@@ -351,6 +351,7 @@ export async function POST(req: Request) {
   // ── Upsert bookings ─────────────────────────
   let newBookings = 0
   let updatedBookings = 0
+  let historicalBookings = 0
   const dbErrors: string[] = []
 
   for (const booking of parsed) {
@@ -390,6 +391,9 @@ export async function POST(req: Request) {
       if (insertErr) dbErrors.push(`Insert ${booking.external_booking_id}: ${insertErr.message}`)
       else newBookings++
     }
+
+    // Count bookings whose check-out is already in the past — these won't appear on the calendar
+    if (booking.check_out < today) historicalBookings++
   }
 
   // If every single booking failed to save, return an error with the first message
@@ -416,6 +420,7 @@ export async function POST(req: Request) {
     newBookings,
     updatedBookings,
     cancelledBookings,
+    historicalBookings,
     propertyName: property.name,
     platform: platform.charAt(0).toUpperCase() + platform.slice(1),
     dbErrors: dbErrors.length > 0 ? dbErrors : undefined,

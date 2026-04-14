@@ -49,6 +49,7 @@ export interface ImportResult {
   newBookings: number
   updatedBookings: number
   cancelledBookings: number
+  historicalBookings: number
   propertyName: string
   platform: string
   dbErrors?: string[]

@@ -139,7 +139,7 @@ function ImportSection({
           </>
         ) : (
           <>
-            <span className="font-medium text-slate-300">Vrbo:</span> Export the &quot;Booking Summary&quot; report from your Owner dashboard. If your account has multiple properties, the file will contain all of them — use the address selector below to import one at a time.
+            <span className="font-medium text-slate-300">Vrbo:</span> In your Owner dashboard go to <span className="text-slate-300">Reservations</span>, then click <span className="text-slate-300">Export</span>. Make sure to set the date range to include future dates to capture upcoming bookings — the financial &quot;Booking Summary&quot; report only shows past payouts. If your account has multiple properties, use the address selector below to import one at a time.
           </>
         )}
       </div>
@@ -244,6 +244,16 @@ function ImportSection({
               {state.result.cancelledBookings} booking{state.result.cancelledBookings !== 1 ? 's' : ''} marked as cancelled
             </li>
           </ul>
+          {state.result.historicalBookings > 0 && (
+            <div className="mt-3 pt-3 border-t border-emerald-500/20 flex items-start gap-2">
+              <svg className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p className="text-slate-400 text-xs">
+                {state.result.historicalBookings} of these booking{state.result.historicalBookings !== 1 ? 's are' : ' is'} historical (check-out already passed) and won&apos;t appear on the calendar. Only future bookings are shown.
+              </p>
+            </div>
+          )}
           {state.result.dbErrors && state.result.dbErrors.length > 0 && (
             <div className="mt-3 pt-3 border-t border-emerald-500/20">
               <p className="text-yellow-400 text-xs font-medium mb-1">{state.result.dbErrors.length} booking{state.result.dbErrors.length !== 1 ? 's' : ''} failed to save:</p>
