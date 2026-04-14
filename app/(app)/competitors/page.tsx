@@ -205,6 +205,16 @@ function ListingCard({
             </svg>
           </a>
         )}
+        {/* For AirROI listings show link icon in header row too (either Airbnb or Google search) */}
+        {c.url && hasAirROIData && (
+          <a href={c.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+            className="text-slate-500 hover:text-blue-400 shrink-0 transition-colors"
+            title={c.url.includes('google.com') ? 'Search on Google' : 'View on Airbnb'}>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </a>
+        )}
       </button>
 
       {/* ── Expanded detail panel ── */}
@@ -256,14 +266,14 @@ function ListingCard({
             </div>
           )}
 
-          {/* View on Airbnb link */}
+          {/* View on Airbnb / Search on Google link */}
           {c.url && (
             <a href={c.url} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors">
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
               </svg>
-              View on Airbnb
+              {c.url.includes('google.com') ? 'Search on Google' : 'View on Airbnb'}
             </a>
           )}
         </div>

@@ -609,6 +609,17 @@ export async function fetchAirROIComparables(
           ? Math.round(haversineDistanceMiles(lat, lng, itemLat, itemLng) * 10) / 10
           : null
 
+        // AirROI listing_id is sometimes a real Airbnb listing ID (7–9 digits)
+        // and sometimes their internal database ID (18 digits). Only build an
+        // Airbnb URL if the ID looks like a real one; otherwise fall back to a
+        // Google search by listing name so the user can still find it manually.
+        const isRealAirbnbId = /^\d{1,12}$/.test(id)
+        const url = isRealAirbnbId
+          ? `https://www.airbnb.com/rooms/${id}`
+          : name
+            ? `https://www.google.com/search?q=${encodeURIComponent(`"${name}" airbnb`)}`
+            : null
+
         return {
           listing_id:         id,
           name,
@@ -618,10 +629,7 @@ export async function fetchAirROIComparables(
           property_type:      String(info?.listing_type ?? info?.room_type ?? '') || null,
           distance_miles:     distanceMiles,
           platform:           'airroi',
-          // AirROI IDs are their internal database IDs, not Airbnb listing IDs.
-          // Constructing airbnb.com/rooms/{airroi_id} produces broken 404 links.
-          // Only Apify-sourced listings have real Airbnb URLs.
-          url:                null,
+          url,
           // Fees
           cleaning_fee:       n(pricing?.cleaning_fee),
           extra_guest_fee:    n(pricing?.extra_guest_fee),
