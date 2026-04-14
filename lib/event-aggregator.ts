@@ -14,6 +14,20 @@ export async function syncEvents(): Promise<{ added: number }> {
     (existing || []).map((e) => `${e.name}|${e.event_date}`)
   )
 
+  // Look up property IDs so Eventbrite events can be tagged to the right property
+  const { data: properties } = await supabase
+    .from('properties')
+    .select('id, location')
+
+  const moabPropertyId = properties?.find(p =>
+    p.location?.toLowerCase().includes('moab')
+  )?.id ?? null
+
+  const bearLakePropertyId = properties?.find(p =>
+    p.location?.toLowerCase().includes('bear lake') ||
+    p.location?.toLowerCase().includes('garden city')
+  )?.id ?? null
+
   // Secondary: Eventbrite — wrapped in try/catch, fails silently
   // The app functions fully without Eventbrite; seeded events are the primary source.
   try {
@@ -21,8 +35,8 @@ export async function syncEvents(): Promise<{ added: number }> {
     if (!apiKey) throw new Error('No Eventbrite API key configured')
 
     const searches = [
-      { q: 'Moab Utah', location: 'Moab, UT' },
-      { q: 'Bear Lake Utah', location: 'Garden City, UT' },
+      { q: 'Moab Utah', location: 'Moab, UT', propertyId: moabPropertyId },
+      { q: 'Bear Lake Utah', location: 'Garden City, UT', propertyId: bearLakePropertyId },
     ]
 
     for (const search of searches) {
@@ -60,6 +74,7 @@ export async function syncEvents(): Promise<{ added: number }> {
           event_date: eventDate,
           end_date: event.end?.local?.split('T')[0] ?? null,
           event_type: 'community',
+          property_id: search.propertyId,
           is_active: true,
           notes: event.url ?? null,
           created_at: new Date().toISOString(),

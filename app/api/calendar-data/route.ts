@@ -40,13 +40,14 @@ export async function GET(req: Request) {
       .eq('property_id', property_id)
       .gte('date', todayStr)
       .lte('date', endStr),
-    // All active events in the display window (property-specific + global)
+    // Active events: global (property_id IS NULL) + events tagged to this property
     supabase
       .from('events')
       .select('id, name, event_date, end_date, event_type')
       .eq('is_active', true)
       .gte('event_date', todayStr)
-      .lte('event_date', endStr),
+      .lte('event_date', endStr)
+      .or(`property_id.is.null,property_id.eq.${property_id}`),
   ])
 
   return NextResponse.json({
